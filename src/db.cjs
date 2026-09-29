@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../data/payout.db')) {
@@ -67,8 +68,21 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS status_events (
+      id TEXT PRIMARY KEY,
+      item_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      cause TEXT NOT NULL,
+      detail TEXT,
+      created_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_payments_batch ON payments(batch_id);
     CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status);
+    CREATE INDEX IF NOT EXISTS idx_status_events_item ON status_events(item_id);
+    CREATE INDEX IF NOT EXISTS idx_status_events_batch ON status_events(batch_id);
   `);
 
   // Existing SQLite files predate these columns. Keep their batches and permits.
@@ -211,6 +225,37 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       return result.changes === 1;
     },
 
+    recordStatusEvent({ itemId, batchId, fromStatus, toStatus, cause, detail }) {
+      const stmt = db.prepare(`
+        INSERT INTO status_events (id, item_id, batch_id, from_status, to_status, cause, detail, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const id = `ev_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const now = Date.now();
+      stmt.run(
+        id,
+        itemId,
+        batchId,
+        fromStatus || null,
+        toStatus,
+        cause || 'MANUAL',
+        typeof detail === 'object' && detail !== null ? JSON.stringify(detail) : (detail ? String(detail) : null),
+        now
+      );
+      return { id, itemId, batchId, fromStatus, toStatus, cause, detail, createdAt: now };
+    },
+
+    getStatusEvents(batchId, itemId = null) {
+      if (itemId) {
+        return db.prepare('SELECT * FROM status_events WHERE batch_id = ? AND item_id = ? ORDER BY created_at ASC')
+          .all(batchId, itemId)
+          .map(r => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+      }
+      return db.prepare('SELECT * FROM status_events WHERE batch_id = ? ORDER BY created_at ASC')
+        .all(batchId)
+        .map(r => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+    },
+
     savePayments(batchId, paymentsList) {
       const stmt = db.prepare(`
         INSERT INTO payments (id, batch_id, idx, recipient, amount, proof, status, tx_id, error_code, error_message, updated_at)
@@ -223,6 +268,14 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
           JSON.stringify(p.proof), p.status, p.txId || null,
           p.errorCode || null, p.errorMessage || null, now
         );
+        this.recordStatusEvent({
+          itemId: p.id,
+          batchId,
+          fromStatus: null,
+          toStatus: p.status,
+          cause: 'SUBMISSION',
+          detail: { amount: p.amount, recipient: p.recipient }
+        });
       }
     },
 
@@ -248,6 +301,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
 
     updatePaymentStatus(paymentId, status, fields = {}) {
       const now = Date.now();
+      const current = db.prepare('SELECT batch_id, status FROM payments WHERE id = ?').get(paymentId);
       const updates = ['status = ?', 'updated_at = ?'];
       const params = [status, now];
       if ('txId' in fields) { updates.push('tx_id = ?'); params.push(fields.txId); }
@@ -262,6 +316,24 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       params.push(paymentId);
       const stmt = db.prepare(`UPDATE payments SET ${updates.join(', ')} WHERE id = ?`);
       stmt.run(...params);
+
+      if (current && current.status !== status) {
+        const cause = fields.cause || (status === 'SUBMITTING' ? 'SUBMISSION' : (status === 'CONFIRMED' || status === 'FAILED' ? 'POLL' : 'MANUAL'));
+        const detail = fields.detail || {
+          txId: fields.txId || null,
+          errorCode: fields.errorCode || null,
+          errorMessage: fields.errorMessage || null,
+          attempts: fields.attempts || null
+        };
+        this.recordStatusEvent({
+          itemId: paymentId,
+          batchId: current.batch_id,
+          fromStatus: current.status,
+          toStatus: status,
+          cause,
+          detail
+        });
+      }
     },
 
     getPaymentCounts(batchId) {

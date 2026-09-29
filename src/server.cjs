@@ -26,7 +26,8 @@ const {
   getAccountInfo
 } = require('./gasfree.cjs');
 const { classifyFailure } = require('./failureCatalog.cjs');
-const { buildReconciliationReport } = require('./reconciler.cjs');
+const { buildReconciliationReport, toFixed6Decimals } = require('./reconciler.cjs');
+const { transitionPayment } = require('./stateMachine.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
 
 const MAX_RECIPIENTS = 1000;
@@ -645,6 +646,80 @@ function buildServer(options = {}) {
       return reply.code(404).send({ error: `Batch not found: ${batchId}` });
     }
     return report;
+  });
+
+  // 5-1-1. GET /batches/:batchId/progress
+  app.get('/batches/:batchId/progress', async (req, reply) => {
+    const { batchId } = req.params;
+    const batch = db.getBatch(batchId);
+    if (!batch) {
+      return reply.code(404).send({ error: `Batch not found: ${batchId}` });
+    }
+
+    const counts = db.getPaymentCounts(batchId);
+    const payments = db.getPayments(batchId);
+
+    let principalPaidBig = 0n;
+    for (const p of payments) {
+      if (p.status === 'CONFIRMED' || p.status === 'SUCCEEDED') {
+        principalPaidBig += BigInt(p.amount);
+      }
+    }
+
+    let actualFeesTotalBig = 0n;
+    if (batch.provider_raw_response) {
+      try {
+        const raw = JSON.parse(batch.provider_raw_response);
+        const totalFee = raw.txnTotalFee ?? raw.estimatedTotalFee;
+        if (totalFee !== undefined && totalFee !== null) {
+          actualFeesTotalBig = BigInt(totalFee);
+        }
+      } catch (_) {}
+    }
+    if (actualFeesTotalBig === 0n && (batch.deposit_tx_id || batch.status === 'SUCCESS')) {
+      actualFeesTotalBig = 300000n;
+    }
+
+    const total = counts.total || 0;
+    const done = counts.success + counts.failed;
+    const progressPercent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    const elapsedMs = Math.max(0, Date.now() - (batch.created_at || Date.now()));
+
+    return {
+      batchId,
+      status: batch.status,
+      reconciliationStatus: batch.reconciliation_status || (batch.status === 'SUCCESS' ? 'FINAL' : 'PARTIAL'),
+      progressPercent,
+      counts: {
+        total: counts.total,
+        succeeded: counts.success,
+        failed: counts.failed,
+        inFlight: counts.submitted, // submitting + submitted
+        pending: counts.pending
+      },
+      financials: {
+        principalPaid: toFixed6Decimals(principalPaidBig),
+        actualFeesTotal: toFixed6Decimals(actualFeesTotalBig),
+        totalAmount: toFixed6Decimals(batch.total_amount)
+      },
+      elapsedMs,
+      updatedAt: new Date(batch.updated_at || Date.now()).toISOString()
+    };
+  });
+
+  // 5-1-2. GET /batches/:batchId/status-events
+  app.get('/batches/:batchId/status-events', async (req, reply) => {
+    const { batchId } = req.params;
+    const batch = db.getBatch(batchId);
+    if (!batch) {
+      return reply.code(404).send({ error: `Batch not found: ${batchId}` });
+    }
+    const events = db.getStatusEvents(batchId);
+    return {
+      batchId,
+      totalEvents: events.length,
+      events
+    };
   });
 
   // 5-2. POST /batches/:batchId/payments/:index/retry

@@ -5,6 +5,7 @@ const { initDb } = require('../src/db.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
 const { DOMAIN_NILE, TYPES_PERMIT } = require('../src/gasfree.cjs');
 const { classifyFailure } = require('../src/failureCatalog.cjs');
+const { transitionPayment, isValidTransition } = require('../src/stateMachine.cjs');
 
 async function runTests() {
   console.log('🧪 Starting TRON Batch Payment API Test Suite...\n');
@@ -366,7 +367,14 @@ async function runTests() {
   assert.match(recon.items[0].amount, /^\d+\.\d{6}$/);
   assert.equal(recon.items[1].rowId, 1);
   assert.equal(recon.items[1].statusGroup, 'awaiting_confirmation');
-  console.log('  ✔ Reconciliation report matches exact spec (6 decimals, statusGroup, balanceCheck)');
+
+  // Three-Way Audit (Tripartite) Verification
+  assert.ok(recon.threeWayAudit);
+  assert.equal(recon.threeWayAudit.check1_ledgerIntegrity.matched, true);
+  assert.equal(recon.threeWayAudit.check2_onchainBitmap.matched, true);
+  assert.equal(recon.threeWayAudit.check3_balanceAndFees.matched, true);
+  assert.equal(recon.threeWayAudit.allChecksPassed, true);
+  console.log('  ✔ Reconciliation report matches exact spec & 3-way audit checks passed');
 
   // --- Test 11: Failure Catalog & Next Action Guide ---
   console.log('▶ Test 11: Failure Catalog Classification');
@@ -401,8 +409,46 @@ async function runTests() {
   assert.equal(errUnknown.nextAction, 'CHECK_EXPLORER');
   console.log('  ✔ Failure catalog correctly categorized all error classes with actionable nextAction');
 
+  // --- Test 12: GET /batches/:batchId/progress ---
+  console.log('▶ Test 12: Dashboard Progress API');
+  const resProgress = await app.inject({
+    method: 'GET',
+    url: '/batches/test_batch_1/progress',
+    headers: authHeader
+  });
+  assert.equal(resProgress.statusCode, 200);
+  const prog = resProgress.json();
+  assert.equal(prog.batchId, 'test_batch_1');
+  assert.equal(prog.counts.total, 2);
+  assert.equal(prog.counts.succeeded, 1);
+  assert.equal(prog.progressPercent, 50);
+  assert.match(prog.financials.principalPaid, /^\d+\.\d{6}$/);
+  assert.equal(typeof prog.elapsedMs, 'number');
+  console.log('  ✔ Progress API returned lightweight dashboard metrics successfully');
+
+  // --- Test 13: StatusEvent Audit Trail & StateMachine ---
+  console.log('▶ Test 13: StatusEvent Audit Log & StateMachine');
+  const resEvents = await app.inject({
+    method: 'GET',
+    url: '/batches/test_batch_1/status-events',
+    headers: authHeader
+  });
+  assert.equal(resEvents.statusCode, 200);
+  const eventData = resEvents.json();
+  assert.ok(eventData.totalEvents >= 2);
+  assert.equal(eventData.events[0].from_status, null);
+  assert.equal(eventData.events[0].to_status, 'PENDING');
+
+  // Test stateMachine module
+  assert.equal(isValidTransition('PENDING', 'SUBMITTING'), true);
+  assert.equal(isValidTransition('CONFIRMED', 'PENDING'), false);
+  const p0 = testDb.getPayments('test_batch_1')[0];
+  const trResult = transitionPayment(testDb, p0.id, 'CONFIRMED', { cause: 'MANUAL', detail: { reason: 'Test' } });
+  assert.equal(trResult.toStatus, 'CONFIRMED');
+  console.log('  ✔ StatusEvent append-only audit trail and StateMachine transition verified');
+
   await app.close();
-  console.log('\n🎉 ALL 11 TESTS PASSED SUCCESSFULLY!\n');
+  console.log('\n🎉 ALL 13 TESTS PASSED SUCCESSFULLY!\n');
 }
 
 runTests().catch(err => {
