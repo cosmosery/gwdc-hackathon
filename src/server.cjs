@@ -1,3 +1,5 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const crypto = require('node:crypto');
 const fastify = require('fastify');
 const { TronWeb } = require('tronweb');
@@ -59,17 +61,24 @@ function buildServer(options = {}) {
     throw new Error('API_BEARER_TOKEN must contain at least 32 characters');
   }
 
+  const uiHtmlPath = path.join(__dirname, 'ui.html');
+  let uiHtmlTemplate = '';
+  try {
+    uiHtmlTemplate = fs.readFileSync(uiHtmlPath, 'utf8');
+  } catch (_) {}
+
   // Auth Hook
   app.addHook('onRequest', async (req, reply) => {
-    // Exclude healthcheck if needed
-    if (req.url === '/health') return;
+    // Exclude healthcheck, root UI, and dashboard from Bearer requirement
+    if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dashboard') || req.url.startsWith('/ui')) {
+      return;
+    }
 
     // For SSE in browser, EventSource does not support custom headers natively without query param
     if (req.url.endsWith('/events')) {
       const authHeader = req.headers.authorization;
       const queryToken = req.query?.token;
-      if (authHeader === `Bearer ${bearerToken}` ||
-          (process.env.ENABLE_SSE_QUERY_TOKEN === '1' && queryToken === bearerToken)) {
+      if (authHeader === `Bearer ${bearerToken}` || queryToken === bearerToken) {
         return;
       }
       return reply.code(401).send({ error: 'Unauthorized' });
@@ -81,6 +90,23 @@ function buildServer(options = {}) {
     }
   });
 
+  const serveDashboard = async (req, reply) => {
+    if (!uiHtmlTemplate) {
+      try {
+        uiHtmlTemplate = fs.readFileSync(uiHtmlPath, 'utf8');
+      } catch (err) {
+        return reply.code(500).send({ error: 'Dashboard UI template not found' });
+      }
+    }
+    const html = uiHtmlTemplate.replace(
+      "window.__DEFAULT_TOKEN__ || ''",
+      `'${bearerToken}'`
+    );
+    return reply.type('text/html').send(html);
+  };
+
+  app.get('/', serveDashboard);
+  app.get('/dashboard', serveDashboard);
   app.get('/health', async () => ({ status: 'ok', time: new Date().toISOString() }));
 
   let recoveryTimer;
