@@ -1,0 +1,22 @@
+{
+  "name": "tron-gasfree-batch-nile-probe",
+  "private": true,
+  "scripts": {
+    "check": "node scripts/check-local.cjs",
+    "deploy:factory": "node --env-file=.env scripts/deploy-batch-factory.cjs",
+    "e2e:api": "node --env-file=.env scripts/api-e2e.cjs",
+    "nile": "node scripts/nile-probe.cjs",
+    "start": "node --env-file=.env src/index.cjs",
+    "test": "node --env-file=.env tests/test-api.cjs"
+  },
+  "dependencies": {
+    "@gasfree/gasfree-sdk": "1.1.2",
+    "ethers": "6.15.0",
+    "fastify": "^5.12.5",
+    "solc": "0.8.20",
+    "tronweb": "6.0.4"
+  },
+  "devDependencies": {
+    "ganache": "7.9.2"
+  }
+}
