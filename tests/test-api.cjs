@@ -4,6 +4,7 @@ const { buildServer } = require('../src/server.cjs');
 const { initDb } = require('../src/db.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
 const { DOMAIN_NILE, TYPES_PERMIT } = require('../src/gasfree.cjs');
+const { classifyFailure } = require('../src/failureCatalog.cjs');
 
 async function runTests() {
   console.log('🧪 Starting TRON Batch Payment API Test Suite...\n');
@@ -330,8 +331,78 @@ async function runTests() {
   assert.ok(resRetryBalance.json().error.includes('Insufficient on-chain balance'));
   console.log('  ✔ Verified specific payment retry endpoint handles 404, on-chain paid check (200), and balance check (409)');
 
+  // --- Test 10: GET /batches/:batchId/reconciliation ---
+  console.log('▶ Test 10: Financial Reconciliation Report API');
+  const resReconciliation = await app.inject({
+    method: 'GET',
+    url: '/batches/test_batch_1/reconciliation',
+    headers: authHeader
+  });
+  assert.equal(resReconciliation.statusCode, 200);
+  const recon = resReconciliation.json();
+  assert.equal(recon.batchId, 'test_batch_1');
+  assert.equal(recon.token, 'USDT');
+  assert.equal(recon.decimals, 6);
+  assert.ok(['FINAL', 'PARTIAL', 'MISMATCH'].includes(recon.reconciliationStatus));
+  assert.ok(recon.reconciledAt);
+  assert.equal(recon.summary.totalRows, 2);
+  assert.equal(recon.summary.excluded, 0);
+  assert.equal(recon.summary.payable, 2);
+  assert.equal(recon.summary.succeeded, 1);
+  assert.equal(recon.summary.awaitingConfirmation, 1);
+  // Decimal 6 string format check
+  assert.match(recon.summary.principalPaid, /^\d+\.\d{6}$/);
+  assert.match(recon.summary.estimatedFeesTotal, /^\d+\.\d{6}$/);
+  assert.match(recon.summary.actualFeesTotal, /^\d+\.\d{6}$/);
+  assert.match(recon.summary.balanceCheck.expectedDecrease, /^\d+\.\d{6}$/);
+  assert.match(recon.summary.balanceCheck.actualDecrease, /^\d+\.\d{6}$/);
+  assert.match(recon.summary.balanceCheck.difference, /^\d+\.\d{6}$/);
+  assert.equal(typeof recon.summary.balanceCheck.matched, 'boolean');
+
+  // Verify items list formatting & status mapping
+  assert.equal(recon.items.length, 2);
+  assert.equal(recon.items[0].rowId, 0);
+  assert.equal(recon.items[0].statusGroup, 'success');
+  assert.match(recon.items[0].amount, /^\d+\.\d{6}$/);
+  assert.equal(recon.items[1].rowId, 1);
+  assert.equal(recon.items[1].statusGroup, 'awaiting_confirmation');
+  console.log('  ✔ Reconciliation report matches exact spec (6 decimals, statusGroup, balanceCheck)');
+
+  // --- Test 11: Failure Catalog & Next Action Guide ---
+  console.log('▶ Test 11: Failure Catalog Classification');
+  const errBalance = classifyFailure(new Error('Contract balance 0 is insufficient for payment 1000000'));
+  assert.equal(errBalance.category, 'USER_ACTION');
+  assert.equal(errBalance.reason, 'INSUFFICIENT_BALANCE');
+  assert.equal(errBalance.nextAction, 'TOP_UP_USDT');
+
+  const errNonce = classifyFailure(new Error('NonceNotMatch: current nonce is 4'));
+  assert.equal(errNonce.category, 'AUTO_RETRY');
+  assert.equal(errNonce.reason, 'NONCE_MISMATCH');
+  assert.equal(errNonce.nextAction, 'SYNC_NONCE_AND_RETRY');
+
+  const errDeadline = classifyFailure(new Error('Permit deadline expired'));
+  assert.equal(errDeadline.category, 'USER_ACTION');
+  assert.equal(errDeadline.reason, 'DEADLINE_EXPIRED');
+  assert.equal(errDeadline.nextAction, 'RE_SIGN');
+
+  const errFee = classifyFailure(new Error('Account does not have enough energy or TRX'));
+  assert.equal(errFee.category, 'USER_ACTION');
+  assert.equal(errFee.reason, 'INSUFFICIENT_FEE');
+  assert.equal(errFee.nextAction, 'TOP_UP_TRX');
+
+  const errNetwork = classifyFailure(new Error('ETIMEDOUT: connect to provider timed out'));
+  assert.equal(errNetwork.category, 'AUTO_RETRY');
+  assert.equal(errNetwork.reason, 'NETWORK_TIMEOUT');
+  assert.equal(errNetwork.nextAction, 'RETRY_PAYOUT');
+
+  const errUnknown = classifyFailure(new Error('REVERT: custom error 0x1234'));
+  assert.equal(errUnknown.category, 'MANUAL_REVIEW');
+  assert.equal(errUnknown.reason, 'ONCHAIN_REVERT');
+  assert.equal(errUnknown.nextAction, 'CHECK_EXPLORER');
+  console.log('  ✔ Failure catalog correctly categorized all error classes with actionable nextAction');
+
   await app.close();
-  console.log('\n🎉 ALL 9 TESTS PASSED SUCCESSFULLY!\n');
+  console.log('\n🎉 ALL 11 TESTS PASSED SUCCESSFULLY!\n');
 }
 
 runTests().catch(err => {

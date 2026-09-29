@@ -78,11 +78,17 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
   }
   for (const [column, type] of [
     ['request_id', 'TEXT'], ['refund_tx_id', 'TEXT'],
-    ['refund_amount', 'TEXT'], ['refund_state', 'TEXT']
+    ['refund_amount', 'TEXT'], ['refund_state', 'TEXT'],
+    ['balance_at_start', 'TEXT'], ['reconciliation_status', 'TEXT'], ['reconciled_at', 'INTEGER']
   ]) ensureColumn('batches', column, type);
   for (const [column, type] of [
     ['request_hash', 'TEXT'], ['request_id', 'TEXT'], ['state', 'TEXT']
   ]) ensureColumn('idempotency_keys', column, type);
+  for (const [column, type] of [
+    ['failure_category', 'TEXT'], ['next_action', 'TEXT'], ['failure_reason', 'TEXT'],
+    ['submitted_at', 'INTEGER'], ['finalized_at', 'INTEGER'], ['attempts', 'INTEGER'],
+    ['ref_id', 'TEXT'], ['memo', 'TEXT'], ['payee_name', 'TEXT'], ['original_amount', 'TEXT']
+  ]) ensureColumn('payments', column, type);
 
   return {
     db,
@@ -247,6 +253,12 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       if ('txId' in fields) { updates.push('tx_id = ?'); params.push(fields.txId); }
       if ('errorCode' in fields) { updates.push('error_code = ?'); params.push(fields.errorCode); }
       if ('errorMessage' in fields) { updates.push('error_message = ?'); params.push(fields.errorMessage); }
+      if ('failureCategory' in fields) { updates.push('failure_category = ?'); params.push(fields.failureCategory); }
+      if ('nextAction' in fields) { updates.push('next_action = ?'); params.push(fields.nextAction); }
+      if ('failureReason' in fields) { updates.push('failure_reason = ?'); params.push(fields.failureReason); }
+      if ('submittedAt' in fields) { updates.push('submitted_at = ?'); params.push(fields.submittedAt); }
+      if ('finalizedAt' in fields) { updates.push('finalized_at = ?'); params.push(fields.finalizedAt); }
+      if ('attempts' in fields) { updates.push('attempts = ?'); params.push(fields.attempts); }
       params.push(paymentId);
       const stmt = db.prepare(`UPDATE payments SET ${updates.join(', ')} WHERE id = ?`);
       stmt.run(...params);

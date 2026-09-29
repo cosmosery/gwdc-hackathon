@@ -397,6 +397,71 @@ data: batch SUCCESS
 
 ---
 
+### 4.13 금융 대사 보고서 (`GET /batches/:batchId/reconciliation`)
+배치의 온체인 잔액 변동, 각 행별 지급 상태, 수수료 내역 및 최종 대사 일치 여부를 포괄하는 금융 대사(Reconciliation) 보고서를 반환합니다.
+
+- **메서드**: `GET`
+- **경로**: `/batches/:batchId/reconciliation`
+- **헤더**: `Authorization: Bearer <API_BEARER_TOKEN>`
+- **형식 규칙**:
+  - 모든 금액/수수료는 온체인 정수 단위를 사람이 읽을 수 있는 소수점 6자리 고정 문자열(`"150.000000"`)로 변환하여 출력합니다.
+  - 미발생 필드는 빈 문자열이나 "0"이 아닌 `null`로 표기합니다.
+  - `items`는 `rowId` 오름차순으로 정렬됩니다.
+- **응답 (200 OK)**:
+```json
+{
+  "batchId": "b_1790671222552_564f6a4f",
+  "reconciliationStatus": "FINAL",
+  "reconciledAt": "2026-09-29T12:00:00.000Z",
+  "token": "USDT",
+  "decimals": 6,
+  "summary": {
+    "totalRows": 2,
+    "excluded": 0,
+    "payable": 2,
+    "succeeded": 2,
+    "failed": 0,
+    "awaitingConfirmation": 0,
+    "principalPaid": "3.000000",
+    "estimatedFeesTotal": "0.000000",
+    "actualFeesTotal": "0.000000",
+    "balanceCheck": {
+      "expectedDecrease": "3.000000",
+      "actualDecrease": "3.000000",
+      "difference": "0.000000",
+      "matched": true
+    }
+  },
+  "items": [
+    {
+      "rowId": 0,
+      "refId": null,
+      "payeeName": null,
+      "address": "TPCozYqnistWHH9VaoJtjXp5djKX4VJgai",
+      "amount": "1.000000",
+      "memo": null,
+      "originalAmount": null,
+      "status": "CONFIRMED",
+      "statusGroup": "success",
+      "traceId": "ef36589f-71e1-4f52-80cb-b5491cf646cb",
+      "txHash": "fd6482ffb2f477b4a2833a03a443773107c1a43cb30b1e605b1a810b84e1abce",
+      "explorerUrl": "https://nile.trongrid.io/#/transaction/fd6482ffb2f477b4a2833a03a443773107c1a43cb30b1e605b1a810b84e1abce",
+      "estimatedFee": null,
+      "actualFee": null,
+      "failureReason": null,
+      "failureMessage": null,
+      "failureCategory": null,
+      "nextAction": null,
+      "attempts": 1,
+      "submittedAt": "2026-09-29T11:58:00.000Z",
+      "finalizedAt": "2026-09-29T11:58:05.000Z"
+    }
+  ]
+}
+```
+
+---
+
 ## 5. 보안 및 안전장치 (Security & Safety)
 
 1. **단일 서명 격리**: 사용자의 개인키는 서버로 전송되지 않으며, 사용자는 오직 배포된 `BatchExecutor` 주소를 수취인으로 한 TIP-712 서명만 생성합니다.
@@ -409,3 +474,19 @@ data: batch SUCCESS
    - 서버 재시작 시 메모리 상태에 의존하지 않고 온체인 실제 토큰 잔액(`balanceOf`) 및 계약의 `paidAmount()`, `paid(index)`를 기준으로 상태를 복구합니다.
 5. **릴레이어 Energy/Bandwidth 관리**:
    - 릴레이어 지갑에 충분한 TRX 잔액(최소 50~100 TRX 권장)이 유지되어야 트랜잭션 실행 시 `OUT_OF_ENERGY` 없이 안정적으로 배분이 완료됩니다.
+
+---
+
+## 6. 오류 분류 체계 및 액션 가이드 (Failure Catalog)
+
+모든 런타임 및 온체인 오류는 표준 카탈로그(`src/failureCatalog.cjs`)에 따라 3개 카테고리로 분류되며, 대시보드 및 운영자가 취해야 할 구체적인 `nextAction`을 제공합니다.
+
+| 카테고리 (`failureCategory`) | 원인 코드 (`failureReason`) | 권장 조치 (`nextAction`) | 설명 |
+| :--- | :--- | :--- | :--- |
+| `USER_ACTION` | `INSUFFICIENT_BALANCE` | `TOP_UP_USDT` | 사용자 또는 컨트랙트의 USDT 잔액 부족 |
+| `USER_ACTION` | `INSUFFICIENT_FEE` | `TOP_UP_TRX` | 릴레이어 지갑의 TRX 또는 Energy 부족 |
+| `USER_ACTION` | `DEADLINE_EXPIRED` | `RE_SIGN` | 서명 허용 기한(Permit deadline) 만료로 재서명 필요 |
+| `AUTO_RETRY` | `NONCE_MISMATCH` | `SYNC_NONCE_AND_RETRY` | 온체인 또는 프로바이더 Nonce 불일치로 자동 재동기화 후 재시도 |
+| `AUTO_RETRY` | `NETWORK_TIMEOUT` | `RETRY_PAYOUT` | 일시적인 RPC 또는 네트워크 타임아웃으로 자동 재시도 대상 |
+| `MANUAL_REVIEW` | `ONCHAIN_REVERT` | `CHECK_EXPLORER` | 스마트 컨트랙트 Revert 발생으로 익스플로러 확인 및 수동 검토 필요 |
+| `MANUAL_REVIEW` | `UNKNOWN_ERROR` | `MANUAL_REVIEW` | 미분류 예외로 개발자/운영자 검토 필요 |

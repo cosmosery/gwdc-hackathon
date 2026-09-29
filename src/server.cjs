@@ -25,6 +25,8 @@ const {
   getProviderConfig,
   getAccountInfo
 } = require('./gasfree.cjs');
+const { classifyFailure } = require('./failureCatalog.cjs');
+const { buildReconciliationReport } = require('./reconciler.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
 
 const MAX_RECIPIENTS = 1000;
@@ -622,11 +624,30 @@ function buildServer(options = {}) {
       status: p.status,
       txId: p.tx_id,
       errorCode: p.error_code,
-      errorMessage: p.error_message
+      errorMessage: p.error_message,
+      failureCategory: p.failure_category || null,
+      failureReason: p.failure_reason || null,
+      nextAction: p.next_action || null,
+      submittedAt: p.submitted_at ? new Date(p.submitted_at).toISOString() : null,
+      finalizedAt: p.finalized_at ? new Date(p.finalized_at).toISOString() : null
     }));
   });
 
-  // 5-1. POST /batches/:batchId/payments/:index/retry
+  // 5-1. GET /batches/:batchId/reconciliation
+  app.get('/batches/:batchId/reconciliation', async (req, reply) => {
+    const { batchId } = req.params;
+    let relayerWeb = null;
+    try {
+      relayerWeb = getRelayerWeb();
+    } catch (_) {}
+    const report = await buildReconciliationReport({ db, batchId, relayerWeb });
+    if (!report) {
+      return reply.code(404).send({ error: `Batch not found: ${batchId}` });
+    }
+    return report;
+  });
+
+  // 5-2. POST /batches/:batchId/payments/:index/retry
   app.post('/batches/:batchId/payments/:index/retry', async (req, reply) => {
     const { batchId, index } = req.params;
     const batch = db.getBatch(batchId);
@@ -731,12 +752,12 @@ function buildServer(options = {}) {
         requiredAmount,
         payment.proof,
         submittedTxid => {
-          db.updatePaymentStatus(payment.id, 'SUBMITTED', { txId: submittedTxid });
+          db.updatePaymentStatus(payment.id, 'SUBMITTED', { txId: submittedTxid, submittedAt: Date.now() });
           eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTED tx=${submittedTxid}`);
         }
       );
 
-      db.updatePaymentStatus(payment.id, 'CONFIRMED', { txId: txid });
+      db.updatePaymentStatus(payment.id, 'CONFIRMED', { txId: txid, finalizedAt: Date.now() });
       eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED tx=${txid}`);
       reconcileBatchStatus(db, batchId);
 
@@ -750,7 +771,7 @@ function buildServer(options = {}) {
     } catch (err) {
       const recheck = await checkPaymentPaid(relayerWeb, batch.executor_address, payment.idx).catch(() => false);
       if (recheck) {
-        db.updatePaymentStatus(payment.id, 'CONFIRMED');
+        db.updatePaymentStatus(payment.id, 'CONFIRMED', { finalizedAt: Date.now() });
         eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED`);
         reconcileBatchStatus(db, batchId);
         return {
@@ -761,9 +782,14 @@ function buildServer(options = {}) {
         };
       }
 
+      const classified = classifyFailure(err);
       db.updatePaymentStatus(payment.id, 'FAILED', {
         errorCode: 'EXECUTE_FAILED',
-        errorMessage: err.message
+        errorMessage: err.message,
+        failureCategory: classified.category,
+        failureReason: classified.reason,
+        nextAction: classified.nextAction,
+        finalizedAt: Date.now()
       });
       eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} FAILED`);
       reconcileBatchStatus(db, batchId);
@@ -773,7 +799,10 @@ function buildServer(options = {}) {
         paymentId: payment.id,
         index: payment.idx,
         status: 'FAILED',
-        error: err.message
+        error: err.message,
+        failureCategory: classified.category,
+        failureReason: classified.reason,
+        nextAction: classified.nextAction
       });
     }
   });
@@ -932,7 +961,12 @@ async function executeAllPayments(db, batchId) {
       db.updatePaymentStatus(payment.id, 'PENDING', { txId: null });
     }
 
-    db.updatePaymentStatus(payment.id, 'SUBMITTING');
+    const attempts = (payment.attempts || 0) + 1;
+    const submittedAt = Date.now();
+    db.updatePaymentStatus(payment.id, 'SUBMITTING', {
+      submittedAt,
+      attempts
+    });
     eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTING`);
 
     try {
@@ -949,14 +983,19 @@ async function executeAllPayments(db, batchId) {
         }
       );
 
-      db.updatePaymentStatus(payment.id, 'CONFIRMED', { txId: txid });
+      db.updatePaymentStatus(payment.id, 'CONFIRMED', {
+        txId: txid,
+        finalizedAt: Date.now()
+      });
       successCount++;
       eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED tx=${txid}`);
     } catch (err) {
       // Re-verify on-chain in case it actually succeeded despite error/timeout
       const recheck = await checkPaymentPaid(relayerWeb, batch.executor_address, payment.idx).catch(() => false);
       if (recheck) {
-        db.updatePaymentStatus(payment.id, 'CONFIRMED');
+        db.updatePaymentStatus(payment.id, 'CONFIRMED', {
+          finalizedAt: Date.now()
+        });
         successCount++;
         eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED`);
       } else {
@@ -970,9 +1009,14 @@ async function executeAllPayments(db, batchId) {
             return;
           }
         }
+        const classified = classifyFailure(err);
         db.updatePaymentStatus(payment.id, 'FAILED', {
           errorCode: 'EXECUTE_FAILED',
-          errorMessage: err.message
+          errorMessage: err.message,
+          failureCategory: classified.category,
+          failureReason: classified.reason,
+          nextAction: classified.nextAction,
+          finalizedAt: Date.now()
         });
         failCount++;
         eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} FAILED`);
