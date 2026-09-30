@@ -203,8 +203,25 @@ async function deployBatchExecutorOnChain({
 }
 
 async function checkOnChainBalance(web, tokenAddress, accountAddress) {
-  return confirmedUint(web, tokenAddress, 'balanceOf(address)',
-    [{ type: 'address', value: accountAddress }]);
+  try {
+    const confirmed = await confirmedUint(web, tokenAddress, 'balanceOf(address)',
+      [{ type: 'address', value: accountAddress }]);
+    if (confirmed > 0n) return confirmed;
+  } catch (_) {}
+
+  // Fallback to latest unconfirmed block balance if confirmed is 0 or delayed
+  try {
+    const latest = await web.transactionBuilder.triggerConstantContract(
+      tokenAddress, 'balanceOf(address)', {},
+      [{ type: 'address', value: accountAddress }],
+      web.defaultAddress?.base58 || accountAddress
+    );
+    if (latest.result?.result && latest.constant_result?.[0]) {
+      return BigInt(`0x${latest.constant_result[0]}`);
+    }
+  } catch (_) {}
+
+  return 0n;
 }
 
 async function confirmedUint(web, contractAddress, signature, parameters) {

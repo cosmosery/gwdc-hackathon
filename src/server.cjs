@@ -186,6 +186,13 @@ function buildServer(options = {}) {
   });
   app.addHook('onClose', async () => clearInterval(recoveryTimer));
 
+  app.addHook('preHandler', async (req) => {
+    const batchId = req.params?.batchId || req.body?.batchId;
+    if (batchId && db.ensureBatchSynced) {
+      await db.ensureBatchSynced(batchId);
+    }
+  });
+
   // 1. POST /quote
   app.post('/quote', async (req, reply) => {
     const { sender, token, payments } = req.body || {};
@@ -426,8 +433,64 @@ function buildServer(options = {}) {
       return reply.send(legacyClaim.response);
     }
 
-    const { sig, signature, authorization } = req.body || {};
+    const { sig, signature, authorization, mode, direct } = req.body || {};
     const signatureToUse = sig || signature;
+    const isDirectDeposit = mode === 'direct' || direct === true || (!signatureToUse && !authorization && process.env.ENABLE_DIRECT_EXECUTION !== '0');
+
+    if (isDirectDeposit) {
+      if (process.env.ENABLE_DIRECT_EXECUTION === '0') {
+        return reply.code(404).send({ error: 'Direct execution is disabled' });
+      }
+      const requestHash = keccak256(toUtf8Bytes(JSON.stringify({ mode: 'direct', batchId })));
+      const previous = db.getIdempotencyClaim(idempotencyKey);
+      if (previous) {
+        if (previous.batchId !== batchId || (previous.requestHash && previous.requestHash !== requestHash)) {
+          return reply.code(409).send({ error: 'Idempotency-Key was used for another request' });
+        }
+        return reply.send(previous.response);
+      }
+
+      const relayerWeb = getRelayerWeb();
+      const [balance, paidAmount] = await Promise.all([
+        checkOnChainBalance(relayerWeb, batch.token, batch.executor_address),
+        checkPaidAmount(relayerWeb, batch.executor_address)
+      ]);
+      const required = BigInt(batch.total_amount) - paidAmount;
+      if (balance < required) {
+        return reply.code(400).send({
+          error: `BatchExecutor balance (${balance}) is insufficient; required (${required})`
+        });
+      }
+
+      const requestId = crypto.randomUUID();
+      let claim;
+      try {
+        claim = db.reserveExecution(idempotencyKey, batchId, requestHash, requestId);
+      } catch (error) {
+        return reply.code(503).send({ error: `Could not reserve execution: ${error.message}` });
+      }
+      if (claim.conflict) return reply.code(409).send({ error: 'Idempotency-Key was used for another request' });
+      if (claim.response && !claim.claimed) return reply.send(claim.response);
+      if (claim.unavailable) return reply.code(409).send({ error: `Batch cannot be executed in status ${claim.unavailable}` });
+
+      const responseObj = {
+        batchId,
+        requestId,
+        transactionIds: [],
+        status: 'PROCESSING',
+        mode: 'DIRECT_DEPOSIT',
+        fundedBalance: balance.toString()
+      };
+      db.completeSubmission(batchId, idempotencyKey, responseObj, 'PROCESSING', {
+        requestId,
+        providerState: 'FUNDED_DIRECT'
+      });
+      executeAllPayments(db, batchId).catch(err => {
+        app.log.error({ err, batchId }, 'Direct payout error');
+      });
+      return reply.code(200).send(responseObj);
+    }
+
     if (!signatureToUse || !authorization) {
       return reply.code(400).send({ error: 'Missing signature or authorization in request body' });
     }
@@ -1207,6 +1270,9 @@ async function executeAllPayments(db, batchId) {
   }
 
   reconcileBatchStatus(db, batchId);
+  if (db.syncToRemote) {
+    await db.syncToRemote(batchId);
+  }
 }
 
 function reconcileBatchStatus(db, batchId) {

@@ -10,3 +10,4 @@ probe-result.json
 
 web/dist/
 .vercel/
+artifacts/

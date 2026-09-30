@@ -2,11 +2,29 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { syncToRemote, syncFromRemote, ensureBatchSynced } = require('./remoteStorage.cjs');
 
-function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../data/payout.db')) {
+function initDb(dbPath) {
+  if (!dbPath) {
+    if (process.env.SQLITE_DB_PATH) {
+      dbPath = process.env.SQLITE_DB_PATH;
+    } else if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+      dbPath = '/tmp/payout.db';
+    } else {
+      dbPath = path.join(__dirname, '../data/payout.db');
+    }
+  }
+
   if (dbPath !== ':memory:') {
     const dir = path.dirname(dbPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    // Seed from bundled data/payout.db if creating new db in /tmp
+    const bundledDb = path.join(__dirname, '../data/payout.db');
+    if (dbPath.startsWith('/tmp') && !fs.existsSync(dbPath) && fs.existsSync(bundledDb)) {
+      try {
+        fs.copyFileSync(bundledDb, dbPath);
+      } catch (_) {}
+    }
   }
 
   const db = new DatabaseSync(dbPath);
@@ -129,6 +147,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
         batch.providerRawResponse || null, batch.errorMessage || null,
         batch.createdAt, batch.updatedAt
       );
+      syncToRemote(db, batch.id).catch(() => {});
     },
 
     updateBatchStatus(batchId, status, fields = {}) {
@@ -151,6 +170,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       params.push(batchId);
       const stmt = db.prepare(`UPDATE batches SET ${updates.join(', ')} WHERE id = ?`);
       stmt.run(...params);
+      syncToRemote(db, batchId).catch(() => {});
     },
 
     recordTransaction(batchId, txId, kind) {
@@ -193,6 +213,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
         db.prepare(`UPDATE batches SET status = 'SUBMITTING', request_id = ?, updated_at = ? WHERE id = ?`)
           .run(requestId, Date.now(), batchId);
         db.exec('COMMIT');
+        syncToRemote(db, batchId).catch(() => {});
         return { claimed: true, response };
       } catch (error) {
         db.exec('ROLLBACK');
@@ -222,6 +243,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
         this.updateBatchStatus(batchId, status, fields);
         this.finishExecutionClaim(key, response, status);
         db.exec('COMMIT');
+        syncToRemote(db, batchId).catch(() => {});
       } catch (error) {
         db.exec('ROLLBACK');
         throw error;
@@ -295,6 +317,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
         this.saveBatch(batch);
         this.savePayments(batch.id, paymentsList);
         db.exec('COMMIT');
+        syncToRemote(db, batch.id).catch(() => {});
       } catch (error) {
         db.exec('ROLLBACK');
         throw error;
@@ -343,6 +366,10 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       params.push(paymentId);
       const stmt = db.prepare(`UPDATE payments SET ${updates.join(', ')} WHERE id = ?`);
       stmt.run(...params);
+
+      if (current) {
+        syncToRemote(db, current.batch_id).catch(() => {});
+      }
 
       if (current && current.status !== status) {
         const cause = fields.cause || (status === 'SUBMITTING' ? 'SUBMISSION' : (status === 'CONFIRMED' || status === 'FAILED' ? 'POLL' : 'MANUAL'));
@@ -401,6 +428,18 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
         VALUES (?, ?, ?, ?)
       `);
       stmt.run(key, batchId, JSON.stringify(responseObj), Date.now());
+    },
+
+    syncToRemote(batchId) {
+      return syncToRemote(db, batchId);
+    },
+
+    syncFromRemote(batchId) {
+      return syncFromRemote(db, batchId);
+    },
+
+    ensureBatchSynced(batchId, force) {
+      return ensureBatchSynced(db, batchId, force);
     }
   };
 }

@@ -1,6 +1,9 @@
 {
   "name": "tron-gasfree-batch-nile-probe",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "check": "node scripts/check-local.cjs",
     "deploy:factory": "node --env-file=.env scripts/deploy-batch-factory.cjs",
