@@ -1,3 +1,5 @@
+> 현재 배포 프론트는 수동 GasFree 입금 후 direct execute를 사용합니다. [배포 링크·지갑 지원 범위](docs/CURRENT_INTEGRATION_KO.md). 아래 signed 경로는 백엔드 호환 기능이며 현재 웹의 서명 기능을 뜻하지 않습니다.
+
 # TRON Batch Payment API 명세서 (API Specification)
 
 > 2026-09-30 통합 정정: `/progress`는 단일 경로이며 stages/evidence/paymentPercent와 counts.success/submitted, 호환 별칭 counts.succeeded/inFlight를 제공한다. financials.principalPaid/totalAmount는 소수점 6자리 문자열이다. actualFeesTotal은 근거를 조회하지 않아 null이며 실제 비용 근거는 `/fees`를 확인한다. 저장된 reconciliationStatus가 없으면 null이고 SUCCESS로부터 FINAL을 합성하지 않는다. threeWayAudit 잔액 근거가 없으면 matched=null이다. 공개 대시보드는 서버 Bearer를 HTML에 삽입하지 않는다.
@@ -163,7 +165,15 @@ Merkle Tree를 생성하고 오프체인에서 `BatchFactory`의 CREATE2 결정�
 ---
 
 ### 4.4 배치 실행 요청 (`POST /batches/:batchId/execute`)
-사용자가 서명한 TIP-712 Permit 데이터를 전달하여 GasFree Provider에 입금을 의뢰하고 일괄 배분을 트리거합니다.
+**현재 웹 기본 요청(수동 입금):**
+
+```json
+{"mode":"direct"}
+```
+
+동일한 필수 헤더를 사용하되 authorization/signature 필드는 보내지 않습니다. `{}` 또는 `{"direct":true}`도 최신 서버 계약에서 수동 모드로 분기합니다. 서버는 executorAddress의 실제 balanceOf를 확인하고 충분하면 200 PROCESSING으로 접수해 병렬 지급을 시작합니다. 부족하면 400 `BatchExecutor balance (...) is insufficient`를 반환합니다. 같은 배치의 응답 유실·재요청에는 동일 Idempotency-Key를 유지합니다. PROCESSING은 지급 확정이 아닙니다.
+
+**호환 signed 요청(지원 지갑 연동용):** 사용자가 승인한 TIP-712 Permit 데이터를 전달하여 GasFree Provider에 입금을 의뢰합니다. 아래 서명 예시는 이 호환 경로에만 적용되며 현재 웹에서는 호출하지 않습니다.
 
 - **메서드**: `POST`
 - **경로**: `/batches/:batchId/execute`
@@ -206,7 +216,7 @@ Merkle Tree를 생성하고 오프체인에서 `BatchFactory`의 CREATE2 결정�
 ---
 
 ### 4.5 직접 실행 (`POST /batches/:batchId/execute-direct`)
-GasFree 입금 절차 없이, 이미 `BatchExecutor`에 직접 토큰이 입금되어 있는 경우 릴레이어가 즉시 온체인 Payout을 실행하는 관리/테스트용 엔드포인트입니다.
+이미 `BatchExecutor`에 입금된 토큰의 지급을 시작하는 대체 엔드포인트입니다. 최신 서버 계약상 환경 변수 제약 없이 활성화되며 Bearer 인증은 유지합니다. 현재 웹은 이 경로 대신 `/execute` + `mode: direct`를 사용합니다.
 
 - **메서드**: `POST`
 - **경로**: `/batches/:batchId/execute-direct`

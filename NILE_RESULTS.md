@@ -1,3 +1,5 @@
+> 과거 Nile 실험 기록입니다. 현재 배포는 [Settle 웹](https://settle-payroll-web.vercel.app), 현행 수동 GasFree 흐름과 서드파티 지원 범위는 [현재 연동 문서](docs/CURRENT_INTEGRATION_KO.md)를 참고하세요.
+
 # Nile 실증 결과 — 2026-09-28
 
 2026-09-28 결과는 전체 코드 배포형 BatchExecutor에 대한 기록이다. Factory + clone 결과는 다음 별도 절에 기록했다.

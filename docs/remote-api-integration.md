@@ -1,3 +1,5 @@
+> **현재 배포:** [Settle 웹](https://settle-payroll-web.vercel.app) · [현행 실행 흐름과 지갑 지원 범위](CURRENT_INTEGRATION_KO.md). 현재는 TronLink GasFree 수동 입금 후 `/execute`에 `mode: direct`를 전송합니다. 서드파티 지원 지갑의 사용자 승인 후 자동 제출 경로는 현재 웹에서 활성화되지 않았습니다.
+
 > 현재 흐름과 최신 원격 API 재검증은 [CURRENT_INTEGRATION_KO.md](CURRENT_INTEGRATION_KO.md)를 기준으로 확인하세요. 아래 내용은 작업 시점의 이력을 포함합니다.
 
 # Remote Nile engine connection

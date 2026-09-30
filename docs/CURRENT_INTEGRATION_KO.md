@@ -1,3 +1,29 @@
+## 현재 배포와 지갑 지원 범위 (2026-09-30)
+
+- **프론트:** https://settle-payroll-web.vercel.app
+- **엔진 API:** https://tron-gasfree-batch-nile-probe.vercel.app
+- 배포 사이트의 Connection settings에 엔진 접근 토큰을 입력합니다. 토큰은 해당 탭 메모리에만 유지되며 새로고침 시 다시 입력합니다. 문서·URL·공개 번들에 비밀값을 넣지 않습니다.
+
+### 현재 제공하는 수동 흐름
+
+CSV 업로드·검토 → 견적 → 배치 Vault 주소 생성 → **TronLink 내부 GasFree → Send에서 사용자 수동 송금 승인** → Vault 잔액 확인 → **Start payouts** → 개별 거래 확정·대사.
+
+출금 원천은 사용자의 GasFree 계좌입니다. 연결하는 일반 TRON 주소(EOA)는 GasFree 계좌 소유자 식별용입니다. 웹에서는 PermitTransfer 서명 요청을 하지 않습니다. 수동 입금 확인은 현재 Vault 잔액 검사이므로 **입금 출처가 GasFree인지까지 검증하지 않습니다**. `depositTxId`가 없다는 이유만으로 입금 실패를 뜻하지 않습니다.
+
+Start payouts는 `POST /batches/:batchId/execute`에 `{"mode":"direct"}`와 배치별 `Idempotency-Key`를 보냅니다. `authorization`·`signature`는 포함하지 않습니다. 서버는 실시간 잔액을 확인하고 충분하면 PROCESSING으로 접수해 지급을 실행합니다. 잔액 부족 400은 실행 성공이 아닙니다. `/resume`은 최초 지급 요청을 대체하지 않습니다. 응답 유실·새로고침 후에도 같은 실행 키를 재사용합니다.
+
+### 서드파티 서명을 지원하는 지갑의 연동 흐름
+
+지원 지갑에서는 dApp이 PermitTransfer typed data를 생성 → **사용자가 지갑에서 승인·서명** → dApp이 서명을 수신 → Backend가 GasFree Provider에 제출 → GasFree 계좌에서 Vault로 입금 → 엔진 지급으로 연결할 수 있습니다. 여기서 자동화는 **승인 후 서명 전달·제출·실행의 연결**이며, 사용자 승인 없이 개인키로 자동 서명한다는 뜻이 아닙니다. GasFree 계좌를 통제하는 소유자 EOA가 서명합니다.
+
+GasFree 공식 문서는 이 서명·Provider 제출 구조를 설명합니다: https://docs.gasfree.io/ . 다만 우리 테스트의 TronLink는 `TronLink does not support permit transfer requests from a third party`로 외부 요청을 거절했습니다. **프로토콜 지원과 지갑의 외부 요청 지원은 별개**입니다. 모든 지갑이 불가능하다는 뜻도, 다른 지갑을 이미 검증했다는 뜻도 아닙니다.
+
+현재 배포 프론트는 수동 경로로 고정되어 있습니다. 지원 지갑에서 자동 연동하려면 별도 연결·검증이 필요하며, 지갑만 바꾸면 현재 화면이 자동으로 서명 모드로 전환되지는 않습니다. 백엔드의 기존 signed execute 호환성과 프론트의 현재 제공 기능을 구분합니다.
+
+수동 경로의 fee buffer는 추정 예산이며 PermitTransfer의 강제 `maxFee`가 아닙니다. 실제 수수료는 TronLink 승인 화면에서 확인합니다. 지급 성공은 실행 접수(200)가 아니라 수신자별 확정 상태로 판단합니다.
+
+---
+
 ## 최신 수동 입금 계약 반영 (2026-09-30)
 
 이 절이 아래 과거 서명 방식 설명보다 우선합니다.
