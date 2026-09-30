@@ -12,13 +12,19 @@ async function main() {
   const token = process.env.NILE_USDT_ADDRESS;
   const web = new TronWeb({ fullHost: process.env.NILE_RPC || 'https://nile.trongrid.io', privateKey: key });
   const sender = web.address.fromPrivateKey(key);
-  const db = initDb(process.env.E2E_DB_PATH || '/tmp/gwdc-api-e2e.sqlite');
-  const app = buildServer({ db, logger: false });
+  const count = Number(process.env.E2E_PAYMENT_COUNT || 1);
+  if (!Number.isInteger(count) || count < 1 || count > 3) throw Error('Live harness accepts 1–3 self-payments only');
+  const paymentList = Array.from({length: count}, (_, i) => ({recipient: sender, amount: String(10000 * (i + 1))}));
+  const db = process.env.E2E_HTTP_URL ? null : initDb(process.env.E2E_DB_PATH || '/tmp/gwdc-api-e2e.sqlite');
+  const app = process.env.E2E_HTTP_URL ? { ready: async()=>{}, close: async()=>{}, inject: async ({method,url,headers,payload})=>{
+    if(process.env.E2E_HTTP_URL !== 'http://127.0.0.1:3000')throw Error('Live harness only supports local engine');
+    const r=await fetch(process.env.E2E_HTTP_URL+url,{method,headers:{...headers,'Content-Type':'application/json'},...(payload?{body:JSON.stringify(payload)}:{})});const body=await r.text();return {statusCode:r.status,body,json:()=>JSON.parse(body)};
+  }} : buildServer({ db, logger: false });
   const headers = { authorization: `Bearer ${process.env.API_BEARER_TOKEN}` };
   await app.ready();
   try {
     const quote = await app.inject({ method: 'POST', url: '/quote', headers,
-      payload: { sender, token, payments: [{ recipient: sender, amount: '100000' }] } });
+      payload: { sender, token, payments: paymentList } });
     if (quote.statusCode !== 200) throw new Error(`Quote ${quote.statusCode}: ${quote.body}`);
 
     let batch;
@@ -30,24 +36,18 @@ async function main() {
       if (batch.status !== 'READY') throw new Error(`Existing batch is ${batch.status}, expected READY`);
     } else {
       const created = await app.inject({ method: 'POST', url: '/batches', headers,
-        payload: { sender, token, payments: [{ recipient: sender, amount: '100000' }], expiryDuration: 3600 } });
+        payload: { sender, token, payments: paymentList, expiryDuration: 3600 } });
       if (created.statusCode !== 201) throw new Error(`Create ${created.statusCode}: ${created.body}`);
       batch = created.json();
     }
     console.log(JSON.stringify({ stage: 'CREATED', batchId: batch.batchId,
       executorAddress: batch.executorAddress, factoryAddress: batch.factoryAddress }));
 
-    const [account, config] = await Promise.all([getAccountInfo(sender), getProviderConfig()]);
-    const asset = account.assets.find(item => item.tokenAddress === token);
-    const provider = config.providers[0];
-    const maxFee = BigInt(asset.transferFee) + (account.active ? 0n : BigInt(asset.activateFee));
-    const message = {
-      token, serviceProvider: provider.address, user: sender,
-      receiver: batch.executorAddress, value: batch.totalAmount,
-      maxFee: maxFee.toString(),
-      deadline: String(Math.min(Math.floor(Date.now() / 1000) + 180, batch.expiry - 1)),
-      version: 1, nonce: Number(account.nonce)
-    };
+    const prepared = await app.inject({method:'GET',url:`/batches/${batch.batchId}/signing-context`,headers});
+    if (prepared.statusCode !== 200) throw Error(`Signing context ${prepared.statusCode}: ${prepared.body}`);
+    const context = prepared.json();
+    const message = context.authorization;
+    if (message.receiver !== batch.executorAddress || message.value !== batch.totalAmount || context.customerDebitCap !== quote.json().customerDebitCap) throw Error('Context differs from quote/batch');
     const signature = await web.trx._signTypedData(DOMAIN_NILE, TYPES_PERMIT, message, key);
     const idempotencyKey = crypto.randomUUID();
     const input = { authorization: message, signature };
@@ -63,7 +63,7 @@ async function main() {
     }
 
     let result;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 120; i++) {
       await sleep(5000);
       const response = await app.inject({ method: 'GET', url: `/batches/${batch.batchId}`, headers });
       result = response.json();
@@ -73,14 +73,17 @@ async function main() {
     const paymentResponse = await app.inject({ method: 'GET',
       url: `/batches/${batch.batchId}/payments`, headers });
     const payments = paymentResponse.json();
-    if (payments.length !== 1 || payments[0].status !== 'CONFIRMED' ||
-        !await checkPaymentPaid(getRelayerWeb(), batch.executorAddress, 0) ||
+    if (payments.length !== count || payments.some(p=>p.status !== 'CONFIRMED') ||
+        !(await Promise.all(payments.map(p=>checkPaymentPaid(getRelayerWeb(),batch.executorAddress,p.index)))).every(Boolean) ||
         await checkOnChainBalance(getRelayerWeb(), token, batch.executorAddress) !== 0n) {
       throw new Error(`Payment reconciliation failed: ${JSON.stringify(payments)}`);
     }
-    console.log(JSON.stringify({ result: 'PASS', batchId: batch.batchId,
-      gasFreeTx: result.depositTxId, payoutTx: payments[0].txId,
-      replayTraceId: duplicate.json().traceId }));
+    const evidence = { result: 'PASS', verifiedAt: new Date().toISOString(), batchId: batch.batchId,
+      executorAddress: batch.executorAddress, recipientCount: count, principal: batch.totalAmount,
+      gasFreeFeeCap: message.maxFee, gasFreeTx: result.depositTxId, payoutTxs: payments.map(p=>p.txId),
+      allPaidBitmaps: true, executorBalance: '0', replayTraceId: duplicate.json().traceId };
+    require('node:fs').writeFileSync(require('node:path').join(__dirname,'../artifacts/nile-wallet-context-e2e.json'),JSON.stringify(evidence,null,2)+'\n');
+    console.log(JSON.stringify(evidence));
   } finally {
     await app.close();
   }

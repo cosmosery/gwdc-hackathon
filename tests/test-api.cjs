@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { TronWeb } = require('tronweb');
-const { buildServer } = require('../src/server.cjs');
+const { buildServer, buildBatchProgress } = require('../src/server.cjs');
 const { initDb } = require('../src/db.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
 const { DOMAIN_NILE, TYPES_PERMIT } = require('../src/gasfree.cjs');
@@ -121,6 +121,28 @@ async function runTests() {
   assert.equal(batchInfo.counts.total, 2);
   assert.equal(batchInfo.counts.pending, 2);
   console.log('  ✔ Batch record and counts verified:', batchInfo.counts);
+
+  const resProgressReady = await app.inject({ method: 'GET', url: '/batches/test_batch_1/progress', headers: authHeader });
+  assert.equal(resProgressReady.statusCode, 200);
+  const progressReady = resProgressReady.json();
+  assert.equal(progressReady.progressPercent, 10);
+  assert.equal(progressReady.currentStage, 'authorization');
+  assert.equal(progressReady.stages[0].state, 'COMPLETE');
+  assert.equal(progressReady.stages[1].state, 'WAITING');
+  assert.equal(progressReady.evidence.fundingTransaction, false);
+
+  const projectionDb = {
+    getPaymentCounts: () => ({ total: 3, pending: 2, submitted: 0, success: 1, failed: 0 }),
+    getTransactions: () => [{ kind: 'PAYOUT', tx_id: 'a'.repeat(64) }]
+  };
+  const refundedProgress = buildBatchProgress(projectionDb, {
+    id: 'refunded_batch', status: 'REFUNDED', trace_id: 'trace', deposit_tx_id: 'b'.repeat(64),
+    refund_tx_id: 'c'.repeat(64), updated_at: Date.now()
+  });
+  assert.equal(refundedProgress.progressPercent, 100);
+  assert.equal(refundedProgress.paymentPercent, 100);
+  assert.equal(refundedProgress.stages.find(stage => stage.key === 'payouts').state, 'ATTENTION');
+  assert.equal(refundedProgress.evidence.refundTransaction, true);
 
   // --- Test 4-1: Lazy Deployment via POST /batches (0 TRX spent) ---
   console.log('▶ Test 4-1: POST /batches off-chain CREATE2 prediction (Lazy Deployment)');
@@ -352,12 +374,13 @@ async function runTests() {
   assert.equal(recon.summary.awaitingConfirmation, 1);
   // Decimal 6 string format check
   assert.match(recon.summary.principalPaid, /^\d+\.\d{6}$/);
-  assert.match(recon.summary.estimatedFeesTotal, /^\d+\.\d{6}$/);
-  assert.match(recon.summary.actualFeesTotal, /^\d+\.\d{6}$/);
-  assert.match(recon.summary.balanceCheck.expectedDecrease, /^\d+\.\d{6}$/);
-  assert.match(recon.summary.balanceCheck.actualDecrease, /^\d+\.\d{6}$/);
-  assert.match(recon.summary.balanceCheck.difference, /^\d+\.\d{6}$/);
-  assert.equal(typeof recon.summary.balanceCheck.matched, 'boolean');
+  for (const field of ['estimatedFeesTotal','actualFeesTotal']) {
+    assert.ok(recon.summary[field] === null || /^\d+\.\d{6}$/.test(recon.summary[field]));
+  }
+  assert.equal(recon.summary.balanceCheck.actualDecrease, null);
+  assert.equal(recon.summary.balanceCheck.matched, null);
+  assert.equal(recon.summary.evidence.complete, false);
+  assert.notEqual(recon.reconciliationStatus, 'FINAL');
 
   // Verify items list formatting & status mapping
   assert.equal(recon.items.length, 2);
@@ -386,14 +409,14 @@ async function runTests() {
   assert.equal(errDeadline.nextAction, 'RE_SIGN');
 
   const errFee = classifyFailure(new Error('Account does not have enough energy or TRX'));
-  assert.equal(errFee.category, 'USER_ACTION');
+  assert.equal(errFee.category, 'OPERATOR_ACTION');
   assert.equal(errFee.reason, 'INSUFFICIENT_FEE');
-  assert.equal(errFee.nextAction, 'TOP_UP_TRX');
+  assert.equal(errFee.nextAction, 'RESTORE_RELAYER_RESOURCES');
 
   const errNetwork = classifyFailure(new Error('ETIMEDOUT: connect to provider timed out'));
-  assert.equal(errNetwork.category, 'AUTO_RETRY');
+  assert.equal(errNetwork.category, 'MANUAL_REVIEW');
   assert.equal(errNetwork.reason, 'NETWORK_TIMEOUT');
-  assert.equal(errNetwork.nextAction, 'RETRY_PAYOUT');
+  assert.equal(errNetwork.nextAction, 'RECONCILE_EXISTING_ATTEMPT');
 
   const errUnknown = classifyFailure(new Error('REVERT: custom error 0x1234'));
   assert.equal(errUnknown.category, 'MANUAL_REVIEW');

@@ -16,13 +16,13 @@ function classifyFailure(error, context = {}) {
     };
   }
 
-  // 2. User Action needed: Out of Energy / TRX (Relayer / Account)
+  // 2. Operator-funded execution resources; never request customer re-payment.
   if (/OUT_OF_ENERGY/i.test(msg) || /energy.*exceeded/i.test(msg) || /not enough energy/i.test(msg) || /insufficient.*fee/i.test(msg) || /trx/i.test(msg)) {
     return {
-      category: 'USER_ACTION',
+      category: 'OPERATOR_ACTION',
       reason: 'INSUFFICIENT_FEE',
       message: 'Insufficient Energy or TRX to execute transaction',
-      nextAction: 'TOP_UP_TRX'
+      nextAction: 'RESTORE_RELAYER_RESOURCES'
     };
   }
 
@@ -46,13 +46,13 @@ function classifyFailure(error, context = {}) {
     };
   }
 
-  // 5. Auto Retry: Network timeout, RPC glitch, pending status
+  // 5. Resolve the existing attempt before any new submission.
   if (/timeout/i.test(msg) || /timed out/i.test(msg) || /pending/i.test(msg) || /gateway/i.test(msg) || /fetch failed/i.test(msg) || /econnrefused/i.test(msg) || /rate limit/i.test(msg)) {
     return {
-      category: 'AUTO_RETRY',
+      category: 'MANUAL_REVIEW',
       reason: 'NETWORK_TIMEOUT',
       message: 'Transient network or RPC timeout occurred',
-      nextAction: 'RETRY_PAYOUT'
+      nextAction: 'RECONCILE_EXISTING_ATTEMPT'
     };
   }
 

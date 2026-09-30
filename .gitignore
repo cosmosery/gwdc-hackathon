@@ -7,3 +7,5 @@ data/
 *.db
 probe-result.json
 .DS_Store
+
+web/dist/

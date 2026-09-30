@@ -372,6 +372,48 @@ GasFree 입금 절차 없이, 이미 `BatchExecutor`에 직접 토큰이 입금�
 
 ---
 
+### 4.11-1 배치 진행률 조회 (`GET /batches/:batchId/progress`)
+
+고객용 진행 화면에 필요한 단계별 상태를 조회합니다. 진행률은 경과 시간으로 증가하지 않으며, DB에 저장된 Provider trace, 입금 트랜잭션, 지급 트랜잭션, 행별 최종 상태만으로 계산합니다. 따라서 `SUBMISSION_UNKNOWN`은 실패로 바꾸지 않고 `INVESTIGATING`으로 표시합니다.
+
+- **메서드**: `GET`
+- **경로**: `/batches/:batchId/progress`
+- **응답 (200 OK)**:
+```json
+{
+  "batchId": "b_1790671222552_564f6a4f",
+  "status": "PAYOUT_PENDING",
+  "currentStage": "payouts",
+  "progressPercent": 77,
+  "paymentPercent": 50,
+  "isTerminal": false,
+  "updatedAt": "2026-09-30T04:25:31.120Z",
+  "counts": {
+    "total": 2,
+    "pending": 1,
+    "submitted": 0,
+    "success": 1,
+    "failed": 0
+  },
+  "stages": [
+    { "key": "prepared", "label": "Batch prepared", "detail": "Recipients committed and executor address predicted", "state": "COMPLETE" },
+    { "key": "authorization", "label": "Authorization submitted", "detail": "One customer permit is tracked by provider trace ID", "state": "COMPLETE" },
+    { "key": "funding", "label": "GasFree funding", "detail": "Funding transfer is confirmed or evidenced by later on-chain work", "state": "COMPLETE" },
+    { "key": "executor", "label": "Executor ready", "detail": "Deployment or payout evidence is present", "state": "COMPLETE" },
+    { "key": "payouts", "label": "Recipient payouts", "detail": "1 of 2 rows reached a final state", "state": "ACTIVE" },
+    { "key": "reconciliation", "label": "Results available", "detail": "Final rows can be reconciled and exported", "state": "WAITING" }
+  ],
+  "evidence": {
+    "providerTrace": true,
+    "fundingTransaction": true,
+    "payoutTransactions": 1,
+    "refundTransaction": false
+  }
+}
+```
+
+`progressPercent`의 가중치는 준비 10, Provider 접수 15, 입금 25, Executor 증거 10, 행별 최종화 비율 35, 종료 상태 5입니다. 이 값은 업무 흐름의 진행 정도이며 블록체인 확정 확률이나 예상 완료 시간을 뜻하지 않습니다.
+
 ### 4.12 실시간 이벤트 스트림 (`GET /batches/:batchId/events`)
 Server-Sent Events (SSE)를 통해 배치의 진행 상태 및 행별 온체인 트랜잭션 확정 이벤트를 실시간 수신합니다.
 
@@ -490,3 +532,38 @@ data: batch SUCCESS
 | `AUTO_RETRY` | `NETWORK_TIMEOUT` | `RETRY_PAYOUT` | 일시적인 RPC 또는 네트워크 타임아웃으로 자동 재시도 대상 |
 | `MANUAL_REVIEW` | `ONCHAIN_REVERT` | `CHECK_EXPLORER` | 스마트 컨트랙트 Revert 발생으로 익스플로러 확인 및 수동 검토 필요 |
 | `MANUAL_REVIEW` | `UNKNOWN_ERROR` | `MANUAL_REVIEW` | 미분류 예외로 개발자/운영자 검토 필요 |
+
+## 7. 수수료 정책 통합 예정 사항 (미구현)
+
+[Fee Budget & Settlement 계약 초안](docs/FEE_BUDGET_MODULE_CONTRACT.md)과 [근거·발표 설명](docs/FEE_POLICY_EVIDENCE.md)을 참고한다. 추가 결제 없는 정책을 위한 정상 실행·지급별 추가 1회·배포 추가 1회·환불 1회 예산과 원자적 예약, 정산을 정의했다. 현재 API에는 구현되지 않았으며 요청/응답 필드를 변경하지 않았다.
+
+현재 `estimatedTotal`은 원금 + GasFree 예상 수수료이며 사용자 최종 결제 상한이 아니다. `estimatedRelayerFeeTrx`는 임시 계산식으로, 실제 거래별 `fee_limit`이나 자원 예약액과 다르다. 프론트는 이를 확정 청구액으로 표시하지 않는다.
+
+
+## 8. E2E 검증 후 계약 정정 (2026-09-29, 로컬 수정)
+
+이 절이 앞선 예시와 충돌하면 이 절을 적용한다.
+
+- `reconciliation.summary.estimatedFeesTotal`, `actualFeesTotal`: decimal(6) string 또는 null. 추정값으로 actual을 채우지 않는다.
+- `balanceCheck.expectedDecrease`, `actualDecrease`, `difference`, `matched`: 독립적인 잔액 snapshot 부재로 null. evidenceStatus=`UNAVAILABLE`.
+- `principalCheck`: recordedPaid, onChainPaid, difference, matched, error. 체인 조회 실패는 null과 error로 표현한다.
+- `evidence.complete=false`, missing 배열로 미충족 증빙 제공. 현재 재무 FINAL 발급하지 않음. 지급 성공 여부는 배치/행 지급 상태에서 확인.
+- 행 actualFee는 전체 funding fee의 회계상 배분이며 개별 payout의 TRX 가스비가 아님. 제외 행을 뺀 모든 행에 index 순서로 잔여 최소 단위를 배분. actualFeeSource=`PROVIDER_REPORTED_UNVERIFIED`.
+- INSUFFICIENT_FEE: OPERATOR_ACTION / RESTORE_RELAYER_RESOURCES. 고객 추가결제를 요구하지 않음.
+- NETWORK_TIMEOUT: MANUAL_REVIEW / RECONCILE_EXISTING_ATTEMPT. 기존 시도를 확인하기 전 재전송 금지.
+- 개별 재시도: paid 조회 불가는 503, 기존 tx 조회 불명은 202, 기존 claim 미해결은 409. DB에 방송 전 claim을 기록하며 배치 worker와 공유.
+- 만료 배치의 신규 payout은 409. 만료 주소 회수는 수정된 새 Factory에서만 지원. 기존 배포는 자동 변경되지 않음.
+
+
+## 9. Nile 실제 통합 검증 후 보완
+
+배포/재시도/환불은 저장된 factory_address와 executor_address를 사용한다. 현재 env Factory가 변경돼도 기존 배치 주소를 바꾸지 않는다. Provider config/account HTTP 오류 및 비정상 schema는 503 경로로 전달되고 unsupported token이나 빈 계정으로 오인하지 않는다. SSE raw stream과 query 인증 옵션을 검증했다. 실제 Nile 증빙은 docs/NILE_LIVE_E2E_RESULTS.md 참조.
+
+
+## Wallet and fee evidence additions (2026-09-29)
+
+- `POST /quote` adds `gasFreeFeeCap`, `customerDebitCap` (atomic token units), and `feePolicy`. GasFree cap is twice the current account-specific fee including activation when applicable. Relayer TRX remains operator cost; its existing estimate is a placeholder, not a reserved or guaranteed price.
+- `GET /batches/:batchId/signing-context`: READY-only, fresh GasFree nonce/provider, bounded deadline (180 seconds and batch expiry), Nile domain, PermitTransfer types and authorization. No signature or submission occurs. 404 missing, 409 submitted/expired/unavailable account, 503 provider/preparation failure.
+- `POST /batches/:batchId/execute`: persists the authorized fee cap and GasFree account with its atomic execution claim. Existing validation and Idempotency-Key rules remain applicable.
+- `GET /batches/:batchId/fees`: confirmed funding Transfer-log fee, unused authorization (`NOT_CHARGED`), persisted cap comparison, tracked relayer transaction receipts in SUN, principal refund reference and missing evidence. `VERIFIED_TRACKED_FEES` means tracked fee evidence is verified, not that whole-batch financial reconciliation is FINAL. Missing historical cap/deployment tx stays explicitly unknown. Legacy batches are not backfilled with invented evidence.
+- Browser bridge exposes quote/create/signing-context/execute/read reports only, with same-origin mutation checks; bearer stays server-side. This bridge is local development infrastructure, not multi-tenant production authentication.

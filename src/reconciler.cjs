@@ -1,10 +1,10 @@
 /**
  * Reconciler Module
- * Generates audit-grade financial reconciliation reports comparing internal
+ * Generates evidence-qualified reconciliation reports comparing internal
  * records against on-chain balances and GasFree fees.
  */
 
-const { checkOnChainBalance, checkPaidAmount } = require('./tron.cjs');
+const { checkPaidAmount } = require('./tron.cjs');
 
 function toFixed6Decimals(val) {
   if (val === null || val === undefined) return null;
@@ -45,55 +45,36 @@ async function buildReconciliationReport({ db, batchId, relayerWeb }) {
 
   const payable = totalRows - excluded;
 
-  // Derive GasFree fees from provider response or defaults
-  let actualFeesTotalBig = 0n;
-  if (batch.provider_raw_response) {
-    try {
-      const raw = JSON.parse(batch.provider_raw_response);
-      const totalFee = raw.txnTotalFee ?? raw.estimatedTotalFee;
-      if (totalFee !== undefined && totalFee !== null) {
-        actualFeesTotalBig = BigInt(totalFee);
-      }
-    } catch (_) {}
-  }
-  if (actualFeesTotalBig === 0n && (batch.deposit_tx_id || batch.status === 'SUCCESS')) {
-    actualFeesTotalBig = 300000n; // Default transferFee 0.3 USDT
-  }
+  // A missing actual fee is unknown, never an estimate or a synthetic default.
+  let actualFeesTotalBig = null;
+  let estimatedFeesTotalBig = null;
+  try {
+    const raw = JSON.parse(batch.provider_raw_response || '{}');
+    const amount = value => (typeof value === 'string' && /^\d+$/.test(value)) ||
+      (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+      ? BigInt(value) : null;
+    actualFeesTotalBig = amount(raw.txnTotalFee);
+    estimatedFeesTotalBig = amount(raw.estimatedTotalFee);
+  } catch (_) {}
 
-  const estimatedFeesTotalBig = 300000n; // conservative base estimate
-
-  // On-chain check if relayerWeb is provided
-  let onChainPaidAmount = principalPaidBig;
+  let onChainPaidAmount = null;
+  let chainError = null;
   if (relayerWeb && batch.executor_address) {
-    try {
-      const paid = await checkPaidAmount(relayerWeb, batch.executor_address);
-      if (paid > 0n) onChainPaidAmount = paid;
-    } catch (_) {}
-  }
-
-  // Balance Check Calculation
-  // Expected decrease = principal paid + actual gasfree fees
-  const expectedDecreaseBig = onChainPaidAmount + actualFeesTotalBig;
-  const actualDecreaseBig = principalPaidBig + actualFeesTotalBig;
-  const diffBig = expectedDecreaseBig - actualDecreaseBig;
-  const matched = diffBig === 0n;
-
-  let reconciliationStatus = 'FINAL';
-  if (!matched) {
-    reconciliationStatus = 'MISMATCH';
-  } else if (awaitingConfirmation > 0 || (failed > 0 && succeeded > 0)) {
-    reconciliationStatus = 'PARTIAL';
-  } else if (succeeded === payable && payable > 0) {
-    reconciliationStatus = 'FINAL';
-  } else {
-    reconciliationStatus = 'PARTIAL';
-  }
-
+    try { onChainPaidAmount = await checkPaidAmount(relayerWeb, batch.executor_address); }
+    catch (_) { chainError = 'Confirmed chain payment evidence unavailable'; }
+  } else { chainError = 'Chain reader unavailable'; }
+  const principalDifference = onChainPaidAmount === null ? null : onChainPaidAmount - principalPaidBig;
+  // FINAL is reserved for independent balance snapshots and verified fee evidence.
+  // Neither is persisted by this version; successful payout alone is not FINAL.
+  const reconciliationStatus = principalDifference !== null && principalDifference !== 0n ? 'MISMATCH' : 'PARTIAL';
   const nowIso = new Date().toISOString();
-
-  // Distribute estimated fee per item
-  const estimatedFeePerItemBig = totalRows > 0 ? (estimatedFeesTotalBig / BigInt(totalRows)) : 0n;
-  const actualFeePerItemBig = totalRows > 0 ? (actualFeesTotalBig / BigInt(totalRows)) : 0n;
+  const eligible = payments.filter(p => p.status !== 'EXCLUDED');
+  const positions = new Map(eligible.map((p, i) => [p.id, i]));
+  function allocate(total, payment) {
+    if (total === null || !positions.has(payment.id) || !eligible.length) return null;
+    const count = BigInt(eligible.length);
+    return total / count + (BigInt(positions.get(payment.id)) < total % count ? 1n : 0n);
+  }
 
   const items = payments.map(p => {
     let statusGroup = 'awaiting_confirmation';
@@ -121,8 +102,9 @@ async function buildReconciliationReport({ db, batchId, relayerWeb }) {
       traceId: batch.trace_id || null,
       txHash,
       explorerUrl,
-      estimatedFee: toFixed6Decimals(estimatedFeePerItemBig),
-      actualFee: statusGroup === 'success' ? toFixed6Decimals(actualFeePerItemBig) : null,
+      estimatedFee: toFixed6Decimals(allocate(estimatedFeesTotalBig, p)),
+      actualFee: toFixed6Decimals(allocate(actualFeesTotalBig, p)),
+      feeAllocationBasis: 'BATCH_FUNDING_FEE_EQUAL_BY_PAYABLE_ROW',
       failureReason: p.failure_reason || null,
       failureMessage: p.error_message || null,
       failureCategory: p.failure_category || null,
@@ -149,12 +131,24 @@ async function buildReconciliationReport({ db, batchId, relayerWeb }) {
       principalPaid: toFixed6Decimals(principalPaidBig),
       estimatedFeesTotal: toFixed6Decimals(estimatedFeesTotalBig),
       actualFeesTotal: toFixed6Decimals(actualFeesTotalBig),
+      actualFeeSource: actualFeesTotalBig === null ? null : 'PROVIDER_REPORTED_UNVERIFIED',
+      principalCheck: {
+        recordedPaid: toFixed6Decimals(principalPaidBig),
+        onChainPaid: toFixed6Decimals(onChainPaidAmount),
+        difference: toFixed6Decimals(principalDifference),
+        matched: principalDifference === null ? null : principalDifference === 0n,
+        error: chainError
+      },
       balanceCheck: {
-        expectedDecrease: toFixed6Decimals(expectedDecreaseBig),
-        actualDecrease: toFixed6Decimals(actualDecreaseBig),
-        difference: toFixed6Decimals(diffBig),
-        matched
-      }
+        expectedDecrease: null, actualDecrease: null, difference: null, matched: null,
+        evidenceStatus: 'UNAVAILABLE',
+        reason: 'Independent before/after balance snapshots are not recorded'
+      },
+      evidence: { complete: false, missing: [
+        'INDEPENDENT_BALANCE_SNAPSHOTS', 'VERIFIED_FEE_EVIDENCE',
+        ...(onChainPaidAmount === null ? ['CONFIRMED_PAID_AMOUNT'] : [])
+      ] }
+
     },
     items
   };

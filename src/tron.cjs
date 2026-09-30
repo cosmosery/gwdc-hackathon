@@ -35,22 +35,24 @@ function getReadOnlyWeb() {
   return web;
 }
 
-let cachedImplementationAddress = null;
+const cachedImplementationAddresses = new Map();
 async function getImplementationAddress(web, factoryAddress = process.env.NILE_FACTORY_ADDRESS) {
-  if (cachedImplementationAddress) return cachedImplementationAddress;
+  if (cachedImplementationAddresses.has(factoryAddress)) return cachedImplementationAddresses.get(factoryAddress);
   const compiled = getCompiled();
   const factoryInstance = web.contract(compiled.BatchFactory.abi, factoryAddress);
   const raw = await factoryInstance.implementation().call();
-  cachedImplementationAddress = web.address.fromHex(raw);
-  return cachedImplementationAddress;
+  const address = web.address.fromHex(raw);
+  cachedImplementationAddresses.set(factoryAddress, address);
+  return address;
 }
 
 async function isContractDeployed(web, address) {
   try {
     const c = await web.trx.getContract(address);
     return Boolean(c.contract_address && (c.bytecode || c.code_hash));
-  } catch (_) {
-    return false;
+  } catch (error) {
+    if (/contract (does not exist|not found)/i.test(String(error?.message || error))) return false;
+    throw error;
   }
 }
 
@@ -118,7 +120,9 @@ async function deployBatchExecutorOnChain({
   refundAddress,
   expiry,
   batchId,
-  factoryAddressOverride
+  factoryAddressOverride,
+  expectedExecutorAddress,
+  onSubmitted
 }) {
   const compiled = getCompiled();
   const factoryArtifact = compiled.BatchFactory;
@@ -149,20 +153,19 @@ async function deployBatchExecutorOnChain({
   const initCode = cloneInitCode(implementationAddress);
   const predictedAddress = tronCreate2(factoryAddress, salt, initCode);
 
+  if (expectedExecutorAddress && predictedAddress !== expectedExecutorAddress) {
+    throw new Error('Predicted executor differs from persisted batch; refusing deployment');
+  }
+
   // Check if already deployed
-  let alreadyDeployed = false;
-  try {
-    const c = await relayerWeb.trx.getContract(predictedAddress);
-    if (c.contract_address && (c.bytecode || c.code_hash)) {
-      alreadyDeployed = true;
-    }
-  } catch (_) {}
+  const alreadyDeployed = await isContractDeployed(relayerWeb, predictedAddress);
 
   let deploymentTx = null;
   if (!alreadyDeployed) {
     deploymentTx = await factoryInstance.createBatch(
       batchIdBytes(batchId), token, root, totalAmount.toString(), refundAddress, expiry
     ).send({ feeLimit: 1_000_000_000 });
+    if (onSubmitted) onSubmitted(deploymentTx);
     await waitForTx(relayerWeb, deploymentTx);
   }
 
@@ -216,21 +219,13 @@ async function confirmedUint(web, contractAddress, signature, parameters) {
 
 async function checkPaymentPaid(web, executorAddress, index) {
   if (!await isContractDeployed(web, executorAddress)) return false;
-  try {
-    return (await confirmedUint(web, executorAddress, 'paid(uint256)',
-      [{ type: 'uint256', value: index }])) !== 0n;
-  } catch (_) {
-    return false;
-  }
+  return (await confirmedUint(web, executorAddress, 'paid(uint256)',
+    [{ type: 'uint256', value: index }])) !== 0n;
 }
 
 async function checkPaidAmount(web, executorAddress) {
   if (!await isContractDeployed(web, executorAddress)) return 0n;
-  try {
-    return await confirmedUint(web, executorAddress, 'paidAmount()', []);
-  } catch (_) {
-    return 0n;
-  }
+  return await confirmedUint(web, executorAddress, 'paidAmount()', []);
 }
 
 async function executePayoutTx(relayerWeb, executorAddress, index, recipient, amount, proof, onSubmitted) {

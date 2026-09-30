@@ -67,6 +67,10 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS batch_transactions (
+      batch_id TEXT NOT NULL, tx_id TEXT NOT NULL, kind TEXT NOT NULL,
+      PRIMARY KEY (batch_id, tx_id)
+    );
     CREATE INDEX IF NOT EXISTS idx_payments_batch ON payments(batch_id);
     CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status);
   `);
@@ -77,7 +81,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
     if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
   for (const [column, type] of [
-    ['request_id', 'TEXT'], ['refund_tx_id', 'TEXT'],
+    ['authorized_fee_cap','TEXT'], ['gasfree_address','TEXT'], ['request_id', 'TEXT'], ['refund_tx_id', 'TEXT'],
     ['refund_amount', 'TEXT'], ['refund_state', 'TEXT'],
     ['balance_at_start', 'TEXT'], ['reconciliation_status', 'TEXT'], ['reconciled_at', 'INTEGER']
   ]) ensureColumn('batches', column, type);
@@ -114,6 +118,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
     },
 
     updateBatchStatus(batchId, status, fields = {}) {
+      if (fields.refundTxId) this.recordTransaction(batchId, fields.refundTxId, 'REFUND');
       const now = Date.now();
       const updates = ['status = ?', 'updated_at = ?'];
       const params = [status, now];
@@ -134,6 +139,10 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       stmt.run(...params);
     },
 
+    recordTransaction(batchId, txId, kind) {
+      if (txId) db.prepare('INSERT OR IGNORE INTO batch_transactions (batch_id, tx_id, kind) VALUES (?, ?, ?)').run(batchId, txId, kind);
+    },
+    getTransactions(batchId) { return db.prepare('SELECT * FROM batch_transactions WHERE batch_id = ?').all(batchId); },
     getBatch(batchId) {
       const stmt = db.prepare('SELECT * FROM batches WHERE id = ?');
       return stmt.get(batchId);
@@ -145,7 +154,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       return db.prepare(`SELECT * FROM batches WHERE status IN (${placeholders}) ORDER BY created_at ASC`).all(...statuses);
     },
 
-    reserveExecution(key, batchId, requestHash, requestId) {
+    reserveExecution(key, batchId, requestHash, requestId, feeContext = {}) {
       db.exec('BEGIN IMMEDIATE');
       try {
         const existing = db.prepare('SELECT * FROM idempotency_keys WHERE key = ?').get(key);
@@ -161,6 +170,7 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
           db.exec('COMMIT');
           return { unavailable: batch?.status || 'NOT_FOUND' };
         }
+        db.prepare('UPDATE batches SET authorized_fee_cap = ?, gasfree_address = ? WHERE id = ?').run(feeContext.maxFee || null, feeContext.gasFreeAddress || null, batchId);
         const response = { batchId, requestId, transactionIds: [], status: 'SUBMITTING' };
         db.prepare(`INSERT INTO idempotency_keys
           (key, batch_id, response_json, request_hash, request_id, state, created_at)
@@ -246,7 +256,24 @@ function initDb(dbPath = process.env.SQLITE_DB_PATH || path.join(__dirname, '../
       }));
     },
 
+    clearFailedPaymentTx(paymentId, txId) {
+      // A stale worker must not overwrite another worker's newer claim.
+      return db.prepare(`UPDATE payments SET status = 'PENDING', tx_id = NULL, updated_at = ?
+        WHERE id = ? AND tx_id = ? AND status IN ('PENDING', 'SUBMITTED', 'FAILED')`)
+        .run(Date.now(), paymentId, txId).changes === 1;
+    },
+
+    reservePayment(paymentId) {
+      // Persist the claim before broadcasting. An abandoned SUBMITTING row
+      // cannot be automatically re-sent without resolving its prior attempt.
+      return db.prepare(`UPDATE payments SET status = 'SUBMITTING',
+        attempts = COALESCE(attempts, 0) + 1, submitted_at = ?, updated_at = ?
+        WHERE id = ? AND status IN ('PENDING', 'FAILED') AND tx_id IS NULL`)
+        .run(Date.now(), Date.now(), paymentId).changes === 1;
+    },
+
     updatePaymentStatus(paymentId, status, fields = {}) {
+      if (fields.txId) { const payment=db.prepare('SELECT batch_id FROM payments WHERE id = ?').get(paymentId); if (payment) this.recordTransaction(payment.batch_id, fields.txId, 'PAYOUT'); }
       const now = Date.now();
       const updates = ['status = ?', 'updated_at = ?'];
       const params = [status, now];

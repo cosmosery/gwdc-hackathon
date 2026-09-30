@@ -7,7 +7,17 @@
     "e2e:api": "node --env-file=.env scripts/api-e2e.cjs",
     "nile": "node scripts/nile-probe.cjs",
     "start": "node --env-file=.env src/index.cjs",
-    "test": "node --env-file=.env tests/test-api.cjs"
+    "test": "node --env-file=.env tests/test-api.cjs",
+    "dev:web": "node --env-file=.env --env-file-if-exists=.env.frontend.local scripts/frontend-dev.cjs",
+    "build:web": "npm --prefix web run build",
+    "test:web": "npm --prefix web test",
+    "test:engine:scenarios": "node tests/engine-scenarios.cjs",
+    "test:contract:scenarios": "node tests/contract-scenarios.cjs",
+    "test:recovery:boundaries": "node --test tests/recovery-boundaries.cjs",
+    "test:provider:boundaries": "node --test tests/gasfree-boundaries.cjs",
+    "test:events": "node --test tests/events-integration.cjs",
+    "test:fee:evidence": "node --test tests/fee-evidence.cjs",
+    "test:frontend:bridge": "node --test tests/frontend-bridge.cjs"
   },
   "dependencies": {
     "@gasfree/gasfree-sdk": "1.1.2",

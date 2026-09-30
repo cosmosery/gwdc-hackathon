@@ -32,7 +32,9 @@ contract BatchExecutor {
         require(!initialized, "already initialized");
         require(token_ != address(0) && refund_ != address(0), "zero address");
         require(root_ != bytes32(0) && total_ > 0, "empty batch");
-        require(expiry_ > block.timestamp, "expired");
+        // A funded counterfactual address must remain deployable for refunds.
+        // execute() still rejects every payout at/after expiry.
+        require(expiry_ > 0, "invalid expiry");
         token = token_;
         paymentsRoot = root_;
         totalAmount = total_;

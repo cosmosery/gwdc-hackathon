@@ -49,6 +49,7 @@ async function apiRequest(method, endpoint, body) {
   const response = await fetch(BASE_URL + path, {
     method,
     headers,
+    signal: AbortSignal.timeout(15000),
     ...(body ? { body: JSON.stringify(body) } : {})
   });
 
@@ -122,15 +123,22 @@ async function getProviderConfig() {
     apiRequest('GET', '/config/token/all'),
     apiRequest('GET', '/config/provider/all')
   ]);
-  return {
-    tokens: tokensRes.body?.data?.tokens || [],
-    providers: providersRes.body?.data?.providers || []
-  };
+  if (!tokensRes.ok || tokensRes.body?.code !== 200 ||
+      !providersRes.ok || providersRes.body?.code !== 200 ||
+      !Array.isArray(tokensRes.body?.data?.tokens) ||
+      !Array.isArray(providersRes.body?.data?.providers)) {
+    throw new Error('GasFree configuration unavailable or invalid');
+  }
+  return { tokens: tokensRes.body.data.tokens, providers: providersRes.body.data.providers };
 }
 
 async function getAccountInfo(userAddress) {
   const res = await apiRequest('GET', `/address/${userAddress}`);
-  return res.body?.data;
+  if (!res.ok || res.body?.code !== 200 || !res.body?.data ||
+      !Array.isArray(res.body.data.assets)) {
+    throw new Error('GasFree account information unavailable or invalid');
+  }
+  return res.body.data;
 }
 
 module.exports = {

@@ -19,12 +19,14 @@ const {
 } = require('./tron.cjs');
 const {
   DOMAIN_NILE,
+  TYPES_PERMIT,
   verifyTip712Permit,
   submitGasFreePermit,
   queryGasFreeStatus,
   getProviderConfig,
   getAccountInfo
 } = require('./gasfree.cjs');
+const { buildFeeReport } = require('./feeReport.cjs');
 const { classifyFailure } = require('./failureCatalog.cjs');
 const { buildReconciliationReport } = require('./reconciler.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
@@ -47,6 +49,67 @@ function positiveAmount(value) {
   return amount;
 }
 
+const TERMINAL_BATCH_STATES = new Set(['SUCCESS', 'PARTIAL_SUCCESS', 'FAILED', 'REFUNDED']);
+const POST_FUNDING_STATES = new Set(['PAYOUT_PENDING', 'SUCCESS', 'PARTIAL_SUCCESS', 'REFUNDED']);
+
+function buildBatchProgress(db, batch) {
+  const counts = db.getPaymentCounts(batch.id);
+  const transactions = db.getTransactions(batch.id);
+  const terminal = TERMINAL_BATCH_STATES.has(batch.status);
+  const authorizationComplete = Boolean(batch.trace_id) || [
+    'PROCESSING', 'DEPOSIT_UNCONFIRMED', 'PAYOUT_PENDING', 'SUCCESS', 'PARTIAL_SUCCESS', 'REFUNDED'
+  ].includes(batch.status);
+  const fundingComplete = Boolean(batch.deposit_tx_id) || POST_FUNDING_STATES.has(batch.status);
+  const payoutEvidence = transactions.some(tx => tx.kind === 'PAYOUT') || counts.success + counts.failed > 0;
+  const executorComplete = payoutEvidence || ['SUCCESS', 'PARTIAL_SUCCESS', 'REFUNDED'].includes(batch.status);
+  const finalized = batch.status === 'REFUNDED' ? counts.total : counts.success + counts.failed;
+  const paymentPercent = counts.total ? Math.floor(finalized / counts.total * 100) : 0;
+
+  const stageState = {
+    prepared: 'COMPLETE',
+    authorization: authorizationComplete ? 'COMPLETE' : batch.status === 'SUBMISSION_UNKNOWN' ? 'INVESTIGATING' : batch.status === 'SUBMITTING' ? 'ACTIVE' : 'WAITING',
+    funding: fundingComplete ? 'COMPLETE' : ['PROCESSING', 'DEPOSIT_UNCONFIRMED'].includes(batch.status) ? 'ACTIVE' : batch.status === 'SUBMISSION_UNKNOWN' ? 'INVESTIGATING' : 'WAITING',
+    executor: executorComplete ? 'COMPLETE' : fundingComplete ? 'ACTIVE' : 'WAITING',
+    payouts: counts.total > 0 && finalized === counts.total ? (counts.failed || (batch.status === 'REFUNDED' && counts.success < counts.total) ? 'ATTENTION' : 'COMPLETE') : payoutEvidence || batch.status === 'PAYOUT_PENDING' ? 'ACTIVE' : 'WAITING',
+    reconciliation: terminal ? (['PARTIAL_SUCCESS', 'FAILED'].includes(batch.status) ? 'ATTENTION' : 'COMPLETE') : 'WAITING'
+  };
+  const definitions = [
+    ['prepared', 'Batch prepared', 'Recipients committed and executor address predicted'],
+    ['authorization', 'Authorization submitted', 'One customer permit is tracked by provider trace ID'],
+    ['funding', 'GasFree funding', 'Funding transfer is confirmed or evidenced by later on-chain work'],
+    ['executor', 'Executor ready', 'Deployment or payout evidence is present'],
+    ['payouts', 'Recipient payouts', `${finalized} of ${counts.total} rows reached a final state`],
+    ['reconciliation', 'Results available', 'Final rows can be reconciled and exported']
+  ];
+  const stages = definitions.map(([key, label, detail]) => ({ key, label, detail, state: stageState[key] }));
+  const current = stages.find(stage => stage.state !== 'COMPLETE') || stages[stages.length - 1];
+  const progressPercent = Math.min(100,
+    10 +
+    (authorizationComplete ? 15 : 0) +
+    (fundingComplete ? 25 : 0) +
+    (executorComplete ? 10 : 0) +
+    Math.floor(35 * paymentPercent / 100) +
+    (terminal ? 5 : 0)
+  );
+  return {
+    batchId: batch.id,
+    status: batch.status,
+    currentStage: current.key,
+    progressPercent,
+    paymentPercent,
+    isTerminal: terminal,
+    updatedAt: new Date(batch.updated_at).toISOString(),
+    counts,
+    stages,
+    evidence: {
+      providerTrace: Boolean(batch.trace_id),
+      fundingTransaction: Boolean(batch.deposit_tx_id),
+      payoutTransactions: transactions.filter(tx => tx.kind === 'PAYOUT').length,
+      refundTransaction: Boolean(batch.refund_tx_id)
+    }
+  };
+}
+
 function buildServer(options = {}) {
   const app = fastify({
     logger: options.logger ?? false
@@ -64,7 +127,7 @@ function buildServer(options = {}) {
     if (req.url === '/health') return;
 
     // For SSE in browser, EventSource does not support custom headers natively without query param
-    if (req.url.endsWith('/events')) {
+    if (req.url.split('?')[0].endsWith('/events')) {
       const authHeader = req.headers.authorization;
       const queryToken = req.query?.token;
       if (authHeader === `Bearer ${bearerToken}` ||
@@ -117,7 +180,7 @@ function buildServer(options = {}) {
     let totalAmountBig = 0n;
     for (let i = 0; i < payments.length; i++) {
       const p = payments[i];
-      if (!p.recipient || !TronWeb.isAddress(p.recipient)) {
+      if (!p || typeof p !== 'object' || !p.recipient || !TronWeb.isAddress(p.recipient)) {
         return reply.code(400).send({ error: `Invalid recipient at payment[${i}]` });
       }
       try {
@@ -156,7 +219,10 @@ function buildServer(options = {}) {
       estimatedGasFreeFee,
       estimatedRelayerFeeTrx,
       estimatedTotal,
-      transactionCount
+      transactionCount,
+      gasFreeFeeCap: (BigInt(estimatedGasFreeFee) * 2n).toString(),
+      customerDebitCap: (totalAmountBig + BigInt(estimatedGasFreeFee) * 2n).toString(),
+      feePolicy: { version: "gasfree-headroom-v1", multiplier: 2, relayerPaidBy: "OPERATOR", unusedCap: "NOT_CHARGED", additionalCustomerSignature: false }
     };
   });
 
@@ -183,7 +249,7 @@ function buildServer(options = {}) {
     let totalAmountBig = 0n;
     for (let i = 0; i < payments.length; i++) {
       const p = payments[i];
-      if (!p.recipient || !TronWeb.isAddress(p.recipient)) {
+      if (!p || typeof p !== 'object' || !p.recipient || !TronWeb.isAddress(p.recipient)) {
         return reply.code(400).send({ error: `Invalid recipient at payment[${i}]` });
       }
       let amt;
@@ -290,6 +356,33 @@ function buildServer(options = {}) {
     });
   });
 
+  app.get('/batches/:batchId/fees', async (req, reply) => {
+    const batch=db.getBatch(req.params.batchId);
+    if(!batch)return reply.code(404).send({error:'Batch not found'});
+    return buildFeeReport(db,batch,getReadOnlyWeb(),getAccountInfo);
+  });
+
+  // Read-only preparation: never signs, reserves, or submits a permit.
+  app.get('/batches/:batchId/signing-context', async (req, reply) => {
+    const batch = db.getBatch(req.params.batchId);
+    if (!batch) return reply.code(404).send({ error: 'Batch not found' });
+    if (batch.status !== 'READY') return reply.code(409).send({ error: 'Batch is already submitted; inspect its status instead of signing again' });
+    const deadline = Math.min(Math.floor(Date.now() / 1000) + 180, Number(batch.expiry));
+    if (deadline <= Math.floor(Date.now() / 1000) + 15) return reply.code(409).send({ error: 'Batch is too close to expiry' });
+    try {
+      const [config, account] = await Promise.all([getProviderConfig(), getAccountInfo(batch.sender)]);
+      const asset = account.assets.find(a => sameAddress(a.tokenAddress, batch.token));
+      if (!asset || !config.tokens.some(t => t.supported && sameAddress(t.tokenAddress, batch.token)) || !config.providers.length) throw Error('Unsupported token or missing provider');
+      if (account.allowSubmit === false || account.allow_submit === false) return reply.code(409).send({ error: 'GasFree account cannot submit right now' });
+      const fee = BigInt(asset.transferFee) + (account.active ? 0n : BigInt(asset.activateFee));
+      if (fee < 0n) throw Error('Invalid fee');
+      const maxFee = fee * 2n;
+      const authorization = { token: batch.token, serviceProvider: config.providers[0].address, user: batch.sender, receiver: batch.executor_address, value: String(batch.total_amount), maxFee: maxFee.toString(), deadline, version: 1, nonce: String(account.nonce) };
+      for (const key of ['value','maxFee','nonce']) if (!/^\d+$/.test(String(authorization[key])) || !Number.isSafeInteger(Number(authorization[key]))) throw Error('Permit exceeds provider integer range');
+      return { batchId: batch.id, domain: DOMAIN_NILE, types: TYPES_PERMIT, authorization, estimatedGasFreeFee: fee.toString(), customerDebitCap: (BigInt(batch.total_amount) + maxFee).toString(), feePolicy: 'gasfree-headroom-v1', gasFreeAddress: account.gasFreeAddress };
+    } catch (error) { return reply.code(503).send({ error: `Signing context unavailable: ${error.message}` }); }
+  });
+
   // 3. POST /batches/:batchId/execute
   app.post('/batches/:batchId/execute', async (req, reply) => {
     const { batchId } = req.params;
@@ -357,6 +450,7 @@ function buildServer(options = {}) {
     }
 
     let expectedFee;
+    let gasFreeAddress;
     try {
       const now = Math.floor(Date.now() / 1000);
       if (!sameAddress(authorization.user, batch.sender) || Number(authorization.version) !== 1 ||
@@ -378,6 +472,7 @@ function buildServer(options = {}) {
           BigInt(authorization.nonce) !== BigInt(account?.nonce ?? -1)) {
         return reply.code(409).send({ error: 'GasFree account is unavailable or nonce changed' });
       }
+      gasFreeAddress = account.gasFreeAddress;
       const asset = account.assets?.find(a => sameAddress(a.tokenAddress, batch.token));
       if (!asset) return reply.code(400).send({ error: 'GasFree account does not support batch token' });
       expectedFee = BigInt(asset.transferFee ?? 0) + (account.active ? 0n : BigInt(asset.activateFee ?? 0));
@@ -395,7 +490,7 @@ function buildServer(options = {}) {
     const requestId = crypto.randomUUID();
     let claim;
     try {
-      claim = db.reserveExecution(idempotencyKey, batchId, requestHash, requestId);
+      claim = db.reserveExecution(idempotencyKey, batchId, requestHash, requestId, {maxFee: String(authorization.maxFee), gasFreeAddress});
     } catch (error) {
       return reply.code(503).send({ error: `Could not reserve execution: ${error.message}` });
     }
@@ -528,23 +623,23 @@ function buildServer(options = {}) {
     const batch = db.getBatch(batchId);
     if (!batch) return reply.code(404).send({ error: `Batch not found: ${batchId}` });
     const web = getRelayerWeb();
-    const balance = await checkOnChainBalance(web, batch.token, batch.executor_address);
-    if (balance === 0n) {
-      return { batchId, status: 'EMPTY', refundTxId: batch.refund_tx_id };
+    // Resolve a submitted refund before inspecting its now-empty account.
+    if (batch.refund_state === 'SUBMITTED' && batch.refund_tx_id) {
+      const info = await web.trx.getTransactionInfo(batch.refund_tx_id).catch(() => ({}));
+      if (!info.receipt?.result) return reply.code(202).send({ batchId, status: 'REFUND_PENDING', refundTxId: batch.refund_tx_id });
+      if (info.receipt.result === 'SUCCESS') {
+        const paid = await checkPaidAmount(web, batch.executor_address);
+        const status = paid < BigInt(batch.total_amount) ? 'REFUNDED' : batch.status;
+        db.updateBatchStatus(batchId, status, { refundState: 'CONFIRMED' });
+        return { batchId, status, refundState: 'CONFIRMED', refundTxId: batch.refund_tx_id };
+      }
+      db.updateBatchStatus(batchId, batch.status, { refundState: 'FAILED', refundTxId: null });
     }
+    const balance = await checkOnChainBalance(web, batch.token, batch.executor_address);
+    if (balance === 0n) return { batchId, status: 'EMPTY', refundTxId: batch.refund_tx_id };
     const paidAmount = await checkPaidAmount(web, batch.executor_address);
     if (Math.floor(Date.now() / 1000) < Number(batch.expiry) && paidAmount < BigInt(batch.total_amount)) {
       return reply.code(409).send({ error: 'Refund is available after expiry or full payout' });
-    }
-    if (batch.refund_state === 'SUBMITTED' && batch.refund_tx_id) {
-      const info = await web.trx.getTransactionInfo(batch.refund_tx_id);
-      if (!info.receipt?.result) return reply.code(202).send({ batchId, status: 'REFUND_PENDING', refundTxId: batch.refund_tx_id });
-      if (info.receipt.result === 'SUCCESS') {
-        db.updateBatchStatus(batchId, paidAmount < BigInt(batch.total_amount) ? 'REFUNDED' : batch.status,
-          { refundState: 'CONFIRMED' });
-        return { batchId, status: 'REFUNDED', refundTxId: batch.refund_tx_id };
-      }
-      db.updateBatchStatus(batchId, batch.status, { refundState: 'FAILED' });
     }
     if (!db.reserveRefund(batchId)) {
       return reply.code(409).send({ error: 'Refund is already being processed' });
@@ -557,10 +652,13 @@ function buildServer(options = {}) {
         totalAmount: BigInt(batch.total_amount),
         refundAddress: batch.sender,
         expiry: batch.expiry,
-        batchId: batch.id
+        batchId: batch.id,
+        factoryAddressOverride: batch.factory_address,
+        onSubmitted: txId => db.recordTransaction(batch.id, txId, 'DEPLOY'),
+        expectedExecutorAddress: batch.executor_address
       });
       const txid = await executeRefundTx(web, batch.executor_address, submitted =>
-        db.updateBatchStatus(batchId, batch.status, { refundState: 'SUBMITTED', refundTxId: submitted }));
+        db.updateBatchStatus(batchId, batch.status, { refundState: 'SUBMITTED', refundTxId: submitted, refundAmount: balance.toString() }));
       const status = paidAmount < BigInt(batch.total_amount) ? 'REFUNDED' : batch.status;
       db.updateBatchStatus(batchId, status, {
         refundState: 'CONFIRMED', refundTxId: txid, refundAmount: balance.toString()
@@ -569,7 +667,9 @@ function buildServer(options = {}) {
       return { batchId, status, refundTxId: txid, refundAmount: balance.toString() };
     } catch (error) {
       const current = db.getBatch(batchId);
-      if (!current.refund_tx_id) db.updateBatchStatus(batchId, batch.status, { refundState: 'FAILED' });
+      if (!current.refund_tx_id && !['NETWORK_TIMEOUT', 'UNKNOWN_ERROR'].includes(classifyFailure(error).reason)) {
+        db.updateBatchStatus(batchId, batch.status, { refundState: 'FAILED' });
+      }
       return reply.code(202).send({ batchId, status: 'REFUND_UNCONFIRMED',
         refundTxId: current.refund_tx_id, error: error.message });
     }
@@ -605,6 +705,16 @@ function buildServer(options = {}) {
       refundState: batch.refund_state,
       counts
     };
+  });
+
+  // 4-1. GET /batches/:batchId/progress
+  // A presentation-safe projection of persisted milestones. It never advances
+  // from elapsed time and keeps unknown submission outcomes explicit.
+  app.get('/batches/:batchId/progress', async (req, reply) => {
+    const { batchId } = req.params;
+    const batch = db.getBatch(batchId);
+    if (!batch) return reply.code(404).send({ error: `Batch not found: ${batchId}` });
+    return buildBatchProgress(db, batch);
   });
 
   // 5. GET /batches/:batchId/payments
@@ -664,52 +774,16 @@ function buildServer(options = {}) {
       return reply.code(404).send({ error: `Payment not found: ${index} in batch ${batchId}` });
     }
 
-    const relayerWeb = getRelayerWeb();
-
-    // 1. Check if already confirmed on chain
-    const isPaid = await checkPaymentPaid(relayerWeb, batch.executor_address, payment.idx).catch(() => false);
-    if (isPaid) {
-      db.updatePaymentStatus(payment.id, 'CONFIRMED');
-      reconcileBatchStatus(db, batchId);
-      return {
-        batchId,
-        paymentId: payment.id,
-        index: payment.idx,
-        status: 'CONFIRMED',
-        message: 'Payment is already confirmed on chain'
-      };
-    }
-
-    // 2. Check if batch deposit has arrived or executor is funded
-    let balance = 0n;
+    if (activeBatchJobs.has(batchId)) return reply.code(409).send({ error: 'Batch recovery is already running' });
+    activeBatchJobs.add(batchId);
     try {
-      balance = await checkOnChainBalance(relayerWeb, batch.token, batch.executor_address);
-    } catch (e) {
-      return reply.code(502).send({ error: `Failed to check BatchExecutor balance: ${e.message}` });
-    }
+      const relayerWeb = getRelayerWeb();
 
-    const requiredAmount = BigInt(payment.amount);
-    if (balance < requiredAmount) {
-      return reply.code(409).send({
-        error: `Insufficient on-chain balance (${balance} < ${requiredAmount}) in BatchExecutor for payment[${payment.idx}]`
-      });
-    }
-
-    // 3. Check previous transaction if any
-    if (payment.tx_id) {
-      const info = await relayerWeb.trx.getTransactionInfo(payment.tx_id).catch(() => ({}));
-      const result = info.receipt?.result;
-      if (!result && info.id) {
-        return reply.code(202).send({
-          batchId,
-          paymentId: payment.id,
-          index: payment.idx,
-          status: 'SUBMITTED',
-          txId: payment.tx_id,
-          message: 'Previous payout transaction is still pending confirmation'
-        });
-      }
-      if (result === 'SUCCESS') {
+      // 1. Check if already confirmed on chain
+      let isPaid;
+      try { isPaid = await checkPaymentPaid(relayerWeb, batch.executor_address, payment.idx); }
+      catch (error) { return reply.code(503).send({ error: 'Payment state unavailable; reconcile before retry' }); }
+      if (isPaid) {
         db.updatePaymentStatus(payment.id, 'CONFIRMED');
         reconcileBatchStatus(db, batchId);
         return {
@@ -717,94 +791,148 @@ function buildServer(options = {}) {
           paymentId: payment.id,
           index: payment.idx,
           status: 'CONFIRMED',
-          txId: payment.tx_id
+          message: 'Payment is already confirmed on chain'
         };
       }
-    }
 
-    // 4. Ensure BatchExecutor is deployed on-chain
-    try {
-      await deployBatchExecutorOnChain({
-        relayerWeb,
-        token: batch.token,
-        root: batch.merkle_root,
-        totalAmount: BigInt(batch.total_amount),
-        refundAddress: batch.sender,
-        expiry: batch.expiry,
-        batchId: batch.id
-      });
-    } catch (deployErr) {
-      return reply.code(502).send({
-        error: `Failed to deploy BatchExecutor for retry: ${deployErr.message}`
-      });
-    }
+      // 2. Check if batch deposit has arrived or executor is funded
+      let balance = 0n;
+      try {
+        balance = await checkOnChainBalance(relayerWeb, batch.token, batch.executor_address);
+      } catch (e) {
+        return reply.code(502).send({ error: `Failed to check BatchExecutor balance: ${e.message}` });
+      }
 
-    // 5. Execute payout
-    db.updatePaymentStatus(payment.id, 'SUBMITTING');
-    eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTING`);
+      const requiredAmount = BigInt(payment.amount);
+      if (balance < requiredAmount) {
+        return reply.code(409).send({
+          error: `Insufficient on-chain balance (${balance} < ${requiredAmount}) in BatchExecutor for payment[${payment.idx}]`
+        });
+      }
 
-    try {
-      const txid = await executePayoutTx(
-        relayerWeb,
-        batch.executor_address,
-        payment.idx,
-        payment.recipient,
-        requiredAmount,
-        payment.proof,
-        submittedTxid => {
-          db.updatePaymentStatus(payment.id, 'SUBMITTED', { txId: submittedTxid, submittedAt: Date.now() });
-          eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTED tx=${submittedTxid}`);
+      // 3. Check previous transaction if any
+      if (payment.tx_id) {
+        const info = await relayerWeb.trx.getTransactionInfo(payment.tx_id).catch(() => ({}));
+        const result = info.receipt?.result;
+        if (!result) {
+          return reply.code(202).send({
+            batchId,
+            paymentId: payment.id,
+            index: payment.idx,
+            status: 'SUBMITTED',
+            txId: payment.tx_id,
+            message: 'Previous payout transaction is still pending confirmation'
+          });
         }
-      );
+        if (result === 'SUCCESS') {
+          return reply.code(202).send({ batchId, paymentId: payment.id, status: 'SUBMITTED',
+            txId: payment.tx_id, message: 'Receipt succeeded; waiting for confirmed paid bitmap' });
+        }
+        db.clearFailedPaymentTx(payment.id, payment.tx_id);
+      }
+      if (Math.floor(Date.now() / 1000) >= Number(batch.expiry)) {
+        return reply.code(409).send({ error: 'Batch expired; recover remaining funds through refund' });
+      }
 
-      db.updatePaymentStatus(payment.id, 'CONFIRMED', { txId: txid, finalizedAt: Date.now() });
-      eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED tx=${txid}`);
-      reconcileBatchStatus(db, batchId);
+      // 4. Ensure BatchExecutor is deployed on-chain
+      try {
+        await deployBatchExecutorOnChain({
+          relayerWeb,
+          token: batch.token,
+          root: batch.merkle_root,
+          totalAmount: BigInt(batch.total_amount),
+          refundAddress: batch.sender,
+          expiry: batch.expiry,
+          batchId: batch.id,
+        factoryAddressOverride: batch.factory_address,
+        onSubmitted: txId => db.recordTransaction(batch.id, txId, 'DEPLOY'),
+        expectedExecutorAddress: batch.executor_address
+        });
+      } catch (deployErr) {
+        return reply.code(502).send({
+          error: `Failed to deploy BatchExecutor for retry: ${deployErr.message}`
+        });
+      }
 
-      return {
-        batchId,
-        paymentId: payment.id,
-        index: payment.idx,
-        status: 'CONFIRMED',
-        txId: txid
-      };
-    } catch (err) {
-      const recheck = await checkPaymentPaid(relayerWeb, batch.executor_address, payment.idx).catch(() => false);
-      if (recheck) {
-        db.updatePaymentStatus(payment.id, 'CONFIRMED', { finalizedAt: Date.now() });
-        eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED`);
+      // 5. Execute payout
+      if (!db.reservePayment(payment.id)) return reply.code(409).send({ error: 'Payment already claimed or unresolved; reconcile before retry' });
+      eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTING`);
+
+      try {
+        const txid = await executePayoutTx(
+          relayerWeb,
+          batch.executor_address,
+          payment.idx,
+          payment.recipient,
+          requiredAmount,
+          payment.proof,
+          submittedTxid => {
+            db.updatePaymentStatus(payment.id, 'SUBMITTED', { txId: submittedTxid, submittedAt: Date.now() });
+            eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTED tx=${submittedTxid}`);
+          }
+        );
+
+        db.updatePaymentStatus(payment.id, 'CONFIRMED', { txId: txid, finalizedAt: Date.now() });
+        eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED tx=${txid}`);
         reconcileBatchStatus(db, batchId);
+
         return {
           batchId,
           paymentId: payment.id,
           index: payment.idx,
-          status: 'CONFIRMED'
+          status: 'CONFIRMED',
+          txId: txid
         };
+      } catch (err) {
+        const recheck = await checkPaymentPaid(relayerWeb, batch.executor_address, payment.idx).catch(() => false);
+        if (recheck) {
+          db.updatePaymentStatus(payment.id, 'CONFIRMED', { finalizedAt: Date.now() });
+          eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} CONFIRMED`);
+          reconcileBatchStatus(db, batchId);
+          return {
+            batchId,
+            paymentId: payment.id,
+            index: payment.idx,
+            status: 'CONFIRMED'
+          };
+        }
+
+        const latest = db.getPayments(batchId).find(row => row.id === payment.id);
+        if (latest.tx_id) {
+          const info = await relayerWeb.trx.getTransactionInfo(latest.tx_id).catch(() => ({}));
+          if (!info.receipt?.result || info.receipt.result === 'SUCCESS') {
+            db.updateBatchStatus(batchId, 'PAYOUT_PENDING');
+            return reply.code(202).send({ batchId, paymentId: payment.id, status: 'SUBMITTED', txId: latest.tx_id });
+          }
+        }
+        const classified = classifyFailure(err);
+        if (!latest.tx_id && ['NETWORK_TIMEOUT', 'UNKNOWN_ERROR'].includes(classified.reason)) {
+          db.updateBatchStatus(batchId, 'PAYOUT_PENDING', { errorMessage: 'Payout broadcast outcome unknown; manual reconciliation required' });
+          return reply.code(202).send({ batchId, paymentId: payment.id, status: 'SUBMITTING' });
+        }
+        db.updatePaymentStatus(payment.id, 'FAILED', {
+          errorCode: 'EXECUTE_FAILED',
+          errorMessage: err.message,
+          failureCategory: classified.category,
+          failureReason: classified.reason,
+          nextAction: classified.nextAction,
+          finalizedAt: Date.now()
+        });
+        eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} FAILED`);
+        reconcileBatchStatus(db, batchId);
+
+        return reply.code(502).send({
+          batchId,
+          paymentId: payment.id,
+          index: payment.idx,
+          status: 'FAILED',
+          error: err.message,
+          failureCategory: classified.category,
+          failureReason: classified.reason,
+          nextAction: classified.nextAction
+        });
       }
-
-      const classified = classifyFailure(err);
-      db.updatePaymentStatus(payment.id, 'FAILED', {
-        errorCode: 'EXECUTE_FAILED',
-        errorMessage: err.message,
-        failureCategory: classified.category,
-        failureReason: classified.reason,
-        nextAction: classified.nextAction,
-        finalizedAt: Date.now()
-      });
-      eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} FAILED`);
-      reconcileBatchStatus(db, batchId);
-
-      return reply.code(502).send({
-        batchId,
-        paymentId: payment.id,
-        index: payment.idx,
-        status: 'FAILED',
-        error: err.message,
-        failureCategory: classified.category,
-        failureReason: classified.reason,
-        nextAction: classified.nextAction
-      });
-    }
+    } finally { activeBatchJobs.delete(batchId); }
   });
 
   // 6. GET /batches/:batchId/events (SSE)
@@ -820,6 +948,7 @@ function buildServer(options = {}) {
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.flushHeaders?.();
 
+    reply.hijack();
     eventEmitter.subscribe(batchId, reply);
   });
 
@@ -922,7 +1051,10 @@ async function executeAllPayments(db, batchId) {
       totalAmount: BigInt(batch.total_amount),
       refundAddress: batch.sender,
       expiry: batch.expiry,
-      batchId: batch.id
+      batchId: batch.id,
+        factoryAddressOverride: batch.factory_address,
+        onSubmitted: txId => db.recordTransaction(batch.id, txId, 'DEPLOY'),
+        expectedExecutorAddress: batch.executor_address
     });
   } catch (deployErr) {
     db.updateBatchStatus(batchId, 'PAYOUT_PENDING', {
@@ -958,15 +1090,13 @@ async function executeAllPayments(db, batchId) {
         });
         return;
       }
-      db.updatePaymentStatus(payment.id, 'PENDING', { txId: null });
+      db.clearFailedPaymentTx(payment.id, payment.tx_id);
     }
 
-    const attempts = (payment.attempts || 0) + 1;
-    const submittedAt = Date.now();
-    db.updatePaymentStatus(payment.id, 'SUBMITTING', {
-      submittedAt,
-      attempts
-    });
+    if (!db.reservePayment(payment.id)) {
+      db.updateBatchStatus(batchId, 'PAYOUT_PENDING', { errorMessage: 'Payment attempt is already claimed or unresolved' });
+      return;
+    }
     eventEmitter.emitBatchEvent(batchId, `payment:${payment.idx} SUBMITTING`);
 
     try {
@@ -1002,7 +1132,7 @@ async function executeAllPayments(db, batchId) {
         const latest = db.getPayments(batchId).find(row => row.id === payment.id);
         if (latest?.tx_id) {
           const info = await relayerWeb.trx.getTransactionInfo(latest.tx_id).catch(() => ({}));
-          if (!info.receipt?.result) {
+          if (!info.receipt?.result || info.receipt.result === 'SUCCESS') {
             db.updateBatchStatus(batchId, 'PAYOUT_PENDING', {
               errorMessage: `Awaiting transaction ${latest.tx_id} confirmation`
             });
@@ -1010,6 +1140,10 @@ async function executeAllPayments(db, batchId) {
           }
         }
         const classified = classifyFailure(err);
+        if (!latest?.tx_id && ['NETWORK_TIMEOUT', 'UNKNOWN_ERROR'].includes(classified.reason)) {
+          db.updateBatchStatus(batchId, 'PAYOUT_PENDING', { errorMessage: 'Payout broadcast outcome unknown; reconcile before retry' });
+          return;
+        }
         db.updatePaymentStatus(payment.id, 'FAILED', {
           errorCode: 'EXECUTE_FAILED',
           errorMessage: err.message,
@@ -1041,4 +1175,4 @@ function reconcileBatchStatus(db, batchId) {
   }
 }
 
-module.exports = { buildServer, reconcileBatchStatus };
+module.exports = { buildServer, reconcileBatchStatus, buildBatchProgress };

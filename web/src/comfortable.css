@@ -1,0 +1,177 @@
+/* Shared, readable component sizing. Keep responsive layout instead of page zoom. */
+.st-root { font-size: 16px; line-height: 1.6; }
+.sidebar { width: 240px; padding: 32px 22px; overflow-y: auto; }
+.main { margin-left: 240px; width: calc(100% - 240px); min-width: 0; }
+main { max-width: 1560px; padding: 28px 48px 36px; }
+.main > header { height: 84px; padding: 0 48px; }
+.brand { font-size: 36px; }
+.brandmark { width: 36px; height: 40px; font-size: 30px; }
+.workspace { font-size: 15px; }
+.workspace small, .sidebar-bottom, .nav-label { font-size: 12px; }
+.nav-label { letter-spacing: 1.3px; }
+.nav { min-height: 50px; font-size: 16px; padding: 14px 12px; }
+.sidebar-note h3 { font-size: 30px; }
+.breadcrumb, .network, .live-mode-label { font-size: 14px; }
+.page-top { gap: 24px; margin-bottom: 28px; }
+.page-top h1 { font-size: clamp(32px, 3vw, 42px); line-height: 1.2; }
+.subtitle { font-size: 16px; line-height: 1.65; }
+.section-head { margin: 30px 0 18px; flex-wrap: wrap; }
+h2, .section-head h2, .table-toolbar h2 { font-size: 22px; line-height: 1.4; }
+.section-head p { font-size: 15px; line-height: 1.6; }
+.editorial-label, .small-label, .source-label { font-size: 12px; line-height: 1.6; }
+.button, .button.secondary, .bottom-bar > .button { min-height: 50px; padding: 14px 24px; font-size: 16px; line-height: 1.4; border-radius: 9px; }
+.text-button, .underlined-link, .home-review .underlined-link { font-size: 16px; min-height: 44px; display: inline-flex; align-items: center; }
+.tabs button, .operation-tabs button { font-size: 16px; padding: 12px 18px; min-height: 48px; }
+.tabs button > span, .operation-tabs button span { font-size: 14px; }
+.st-badge, .history-entry > .st-badge { font-size: 14px; height: auto; min-height: 30px; padding: 5px 10px; line-height: 20px; }
+.panel, .detail-card { padding: 30px; border-radius: 14px; }
+.upload { padding: 28px; min-height: 124px; gap: 20px; }
+.upload-icon { width: 56px; height: 56px; flex-shrink: 0; font-size: 30px; }
+.upload strong { font-size: 19px; overflow-wrap: anywhere; }
+.upload p, .upload-cta { font-size: 15px; line-height: 1.6; }
+.st-kpi { padding: 24px; }
+.st-kpi__label { font-size: 12px; line-height: 1.6; }
+.st-kpi__value { font-size: 34px; line-height: 1.3; margin-top: 12px; }
+.st-kpi__meta { font-size: 14px; line-height: 1.5; }
+.st-table th { font-size: 12px; padding: 16px 20px; line-height: 1.5; }
+.st-table th span { font-size: 12px; }
+.st-table td, .list-only .st-table td { font-size: 16px; padding: 20px; }
+.st-table td strong { font-size: 16px; }
+.st-table td small { font-size: 14px; line-height: 1.5; }
+.mono, .st-table .mono { font-size: 14px; }
+.table-toolbar { padding: 18px 20px; gap: 16px; flex-wrap: wrap; }
+.table-footer { font-size: 14px; gap: 16px; flex-wrap: wrap; padding: 16px 20px; }
+.table-scroll { max-height: 650px; }
+label, .check, .approval .check { font-size: 16px; line-height: 1.6; }
+input:not([type=checkbox]), select, .input-action button { font-size: 16px; min-height: 48px; padding: 12px 14px; }
+input[type=checkbox] { width: 20px; height: 20px; }
+.detail-card h3 { font-size: 25px; }
+.detail-card p, .issue, .issue p, .subtle-note, .legend { font-size: 15px; line-height: 1.65; }
+.alert, .fee-details .alert { font-size: 16px; padding: 18px 22px; }
+details, details p, .connection-details, .connection-details summary,
+.assistant-details, .assistant-details summary, .assistant-details p,
+.transaction-details, .transaction-details summary, .fee-details summary { font-size: 14px; line-height: 1.7; }
+summary { padding: 10px 0; }
+.workflow-guide { margin: 26px 0 30px; }
+.workflow-track { gap: 14px; margin-bottom: 22px; }
+.workflow-track li { font-size: 14px; gap: 10px; padding: 12px 0 16px; }
+.workflow-track li > span { width: 32px; height: 32px; font-size: 14px; }
+.workflow-message { padding: 24px; gap: 18px; }
+.workflow-message strong { font-size: 20px; line-height: 1.5; }
+.workflow-message p { font-size: 16px; }
+.workflow-message small, .workflow-message code { font-size: 13px; }
+.workflow-state-icon { font-size: 28px; }
+.review-actions-heading, .review-cleared { padding: 24px; }
+.review-actions-heading h2, .review-cleared strong { font-size: 20px; }
+.review-actions-heading p, .review-cleared p { font-size: 16px; }
+.review-action-row { padding: 22px 24px; grid-template-columns: 44px minmax(0,1fr) auto; gap: 16px; }
+.review-person, .attention-number { width: 44px; height: 44px; font-size: 16px; }
+.review-action-row strong { font-size: 18px; }
+.review-action-row small, .review-action-label { font-size: 15px; }
+.assistant-details { padding: 16px 24px; }
+.bottom-bar { gap: 24px; padding: 20px 0; }
+.bottom-bar strong { font-size: 18px; }
+.bottom-bar p, .bottom-bar span:not(.button span) { font-size: 14px; line-height: 1.6; }
+.empty h3 { font-size: 22px; }
+.empty p { font-size: 16px; }
+.cost-row, .compact-list > div, .signature-summary > div { font-size: 17px; padding: 20px 0; }
+.cost-row small, .compact-list small, .flow { font-size: 14px; }
+.flow { flex-wrap: wrap; }
+.commit-total { font-size: 52px; }
+.commit-total span { font-size: 20px; }
+.manual-send, .funding-check { max-width: 1000px; }
+.manual-send h2 { font-size: 30px; }
+.manual-send > p, .manual-fee span { font-size: 16px; }
+.manual-destination { padding: 24px; }
+.manual-destination span { font-size: 15px; }
+.manual-destination code { font-size: 17px; }
+.manual-destination strong { font-size: 30px; }
+.report-grid h2 { font-size: 30px; }
+.report-grid p, .verification, .fixture-note { font-size: 15px !important; }
+.toast { font-size: 16px; max-width: min(640px, calc(100vw - 32px)); }
+.home-page-top { min-height: 32px; height: auto; margin-bottom: 0; }
+.home-intro { gap: 48px; padding: 30px 0 48px; }
+.home-intro h1 { font-size: clamp(48px, 4.6vw, 72px); }
+.home-intro p { font-size: 18px; max-width: 470px; }
+.home-section-title h2 { font-size: 24px; }
+.home-section-title > span { font-size: 14px; }
+.home-payment, .home-review { padding: 34px; min-height: 270px; }
+.home-amount { font-size: 56px; }
+.home-amount > span { font-size: 18px; }
+.home-payment > p, .home-review > p, .payment-pill { font-size: 16px; }
+.home-review h3 { font-size: 34px; }
+.home-review > p { max-width: 360px; }
+.circle-link { width: 46px; height: 46px; font-size: 24px; }
+.history-entry { padding: 24px 0; }
+.history-entry strong { font-size: 18px; }
+.history-entry small, .history-amount small, .home-history-empty p { font-size: 14px; }
+.history-amount { font-size: 23px; }
+.home-history-empty strong { font-size: 17px; }
+.payment-hero { grid-template-columns: minmax(0,1fr) 350px; gap: 36px; padding: 44px; min-height: 430px; }
+.payment-hero h2 { font-size: clamp(56px, 5vw, 78px); }
+.payment-hero-copy > p { font-size: 17px; max-width: 460px; }
+.payment-receipt { max-width: 350px; padding: 28px; }
+.receipt-top > span:first-child { font-size: 28px; }
+.payment-receipt .editorial-label { font-size: 12px; }
+.receipt-amount { font-size: 46px; }
+.receipt-amount > span, .receipt-line { font-size: 15px; }
+.receipt-bottom { font-size: 9px; letter-spacing: .5px; white-space: normal; }
+.journey-heading h3 { font-size: 26px; }
+.journey-heading .editorial-label { font-size: 12px; }
+.journey-percent { font-size: 30px; }
+.journey-percent small { font-size: 13px; }
+.journey-node { width: 38px; height: 38px; font-size: 14px; }
+.journey-step:before { left: 44px; top: 19px; }
+.journey-step strong { font-size: 16px; }
+.journey-step small { font-size: 14px; }
+.payment-followup strong { font-size: 18px; }
+.payment-followup p, .activity-item strong { font-size: 16px; }
+.activity-item p { font-size: 14px; }
+footer { font-size: 12px; }
+@media (max-width: 1200px) {
+  .sidebar { width: 215px; padding: 28px 16px; }
+  .main { margin-left: 215px; width: calc(100% - 215px); }
+  main, .main > header { padding-left: 28px; padding-right: 28px; }
+  .workflow-track { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .approval-grid, .report-grid { grid-template-columns: minmax(0,1fr); }
+  .payment-hero { grid-template-columns: minmax(0,1fr) 290px; padding: 30px; gap: 24px; }
+  .home-intro { gap: 28px; }
+  .home-cards { grid-template-columns: minmax(0,1fr); }
+  .st-kpis { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .st-kpi:nth-child(3) { border-left: 0; }
+  .st-kpi:nth-child(n+3) { border-top: 1px solid var(--line); }
+}
+@media (max-width: 950px) {
+  .home-intro, .payment-hero { grid-template-columns: minmax(0,1fr); }
+  .payment-receipt { justify-self: center; }
+  .page-top { flex-wrap: wrap; }
+  .bottom-bar { flex-wrap: wrap; }
+  .bottom-bar > div { max-width: none; }
+  .bottom-bar > .button { width: 100%; }
+}
+@media (max-width: 760px) {
+  .sidebar { display: none; }
+  .main { margin: 0; width: 100%; }
+  main { padding: 24px 20px; }
+  .main > header { height: 68px; padding: 0 20px; }
+  .breadcrumb { font-size: 12px; }
+  .network { font-size: 12px; }
+  .workflow-track { gap: 10px; }
+  .workflow-track li { font-size: 13px; gap: 7px; }
+  .workflow-track li > span { width: 28px; height: 28px; }
+  .workflow-message { padding: 20px; }
+  .home-payment, .home-review, .panel, .detail-card { padding: 24px; }
+  .home-intro h1 { font-size: 48px; }
+  .upload { padding: 20px; }
+  .upload > div { min-width: 0; }
+  .st-kpi { padding: 20px 16px; }
+  .st-kpi__value { font-size: 30px; }
+  .review-action-row { grid-template-columns: 40px minmax(0,1fr); padding: 20px; }
+  .review-action-label { grid-column: 2; }
+  .manual-destination { flex-direction: column; align-items: stretch; padding: 18px; }
+  .cost-row { flex-wrap: wrap; gap: 8px; }
+  .journey-heading { flex-wrap: wrap; gap: 18px; }
+  .history-entry { grid-template-columns: 32px minmax(0,1fr) auto; gap: 12px; }
+  .bottom-bar { position: static; }
+  .table-card, .review-grid, .evidence-grid, .panel, .home-intro > * { min-width: 0; }
+}

@@ -1,0 +1,16 @@
+const test=require('node:test'),assert=require('node:assert/strict');
+const {TronWeb}=require('tronweb');const {verifyFundingFee,buildFeeReport}=require('../src/feeReport.cjs');
+const {initDb}=require('../src/db.cjs');
+const token='TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf',source='TGBDK9TQXKwQamc6Lv6bw8fP6dMp2TTBjV',executor='TXkQ1bo8o81XHsHmyB9yocxb5cNGjV2qT2',provider='TQZE7vxcx9qr6d8BczbYYLwfeHJ5ZbDj7c';
+const hex=a=>TronWeb.address.toHex(a).slice(-40).toLowerCase();
+const batch={id:'b',token,total_amount:'100000',executor_address:executor};
+function log(to,amount){return {address:hex(token),topics:['ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',hex(source).padStart(64,'0'),hex(to).padStart(64,'0')],data:BigInt(amount).toString(16).padStart(64,'0')};}
+function receipt(){return {id:'tx',receipt:{result:'SUCCESS'},log:[log(executor,100000),log(provider,300000)]};}
+test('confirmed token logs identify actual debit and GasFree fee',()=>assert.deepEqual(verifyFundingFee(receipt(),batch,source),{principal:'100000',customerDebit:'400000',actualFee:'300000',source:'CONFIRMED_TOKEN_TRANSFER_LOGS'}));
+test('failed transaction cannot establish a paid fee',()=>{const r=receipt();r.receipt.result='REVERT';assert.equal(verifyFundingFee(r,batch,source),null);});
+test('wrong token evidence rejected',()=>{const r=receipt();r.log.forEach(l=>l.address=hex(provider));assert.equal(verifyFundingFee(r,batch,source),null);});
+test('wrong recipient or principal rejected',()=>{assert.equal(verifyFundingFee(receipt(),{...batch,total_amount:'100001'},source),null);assert.equal(verifyFundingFee(receipt(),{...batch,executor_address:provider},source),null);});
+test('zero fee remains exact zero',()=>{const r=receipt();r.log.pop();assert.equal(verifyFundingFee(r,batch,source).actualFee,'0');});
+test('ledger retains failed attempt transactions after payment retry',()=>{const db=initDb(':memory:');try{db.recordTransaction('b','old','PAYOUT');db.recordTransaction('b','new','PAYOUT');db.recordTransaction('b','old','PAYOUT');assert.equal(db.getTransactions('b').length,2);}finally{db.db.close();}});
+test('fee settlement reports unused allowance and includes failed relayer receipt cost',async()=>{const db=initDb(':memory:');try{db.recordTransaction('b','deploy','DEPLOY');db.recordTransaction('b','failed','PAYOUT');const web={trx:{getTransactionInfo:async id=>id==='tx'?receipt():{id,fee:123,receipt:{result:id==='failed'?'OUT_OF_ENERGY':'SUCCESS'}}}};const r=await buildFeeReport(db,{...batch,gasfree_address:source,authorized_fee_cap:'600000',deposit_tx_id:'tx'},web,()=>{throw Error('Must use persisted account');});assert.equal(r.unusedAuthorization,'300000');assert.equal(r.unusedAuthorizationTreatment,'NOT_CHARGED');assert.equal(r.relayerBurnedFeeSun,'246');assert.equal(r.feeCapMatched,true);assert.equal(r.status,'VERIFIED_TRACKED_FEES');}finally{db.db.close();}});
+test('unavailable receipt and legacy cap never become complete settlement',async()=>{const db=initDb(':memory:');try{db.recordTransaction('b','unknown','PAYOUT');const r=await buildFeeReport(db,batch,{trx:{getTransactionInfo:async()=>{throw Error('offline');}}},async()=>({}));assert.equal(r.status,'PARTIAL');assert.equal(r.funding,null);assert.equal(r.unusedAuthorization,null);assert.equal(r.transactions[0].feeSun,null);}finally{db.db.close();}});
