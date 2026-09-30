@@ -124,16 +124,10 @@ function buildServer(options = {}) {
     throw new Error('API_BEARER_TOKEN must contain at least 32 characters');
   }
 
-  const uiHtmlPath = path.join(__dirname, 'ui.html');
-  let uiHtmlTemplate = '';
-  try {
-    uiHtmlTemplate = fs.readFileSync(uiHtmlPath, 'utf8');
-  } catch (_) {}
-
   // Auth Hook
   app.addHook('onRequest', async (req, reply) => {
-    // Exclude healthcheck, root UI, and dashboard from Bearer requirement
-    if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dashboard') || req.url.startsWith('/ui')) {
+    // Exclude healthcheck and root API metadata from Bearer requirement
+    if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dashboard')) {
       return;
     }
 
@@ -153,19 +147,16 @@ function buildServer(options = {}) {
     }
   });
 
-  const serveDashboard = async (req, reply) => {
-    if (!uiHtmlTemplate) {
-      try {
-        uiHtmlTemplate = fs.readFileSync(uiHtmlPath, 'utf8');
-      } catch (err) {
-        return reply.code(500).send({ error: 'Dashboard UI template not found' });
-      }
-    }
-    return reply.type('text/html').send(uiHtmlTemplate);
-  };
+  const serveApiRoot = async () => ({
+    status: 'ok',
+    service: 'Settle Engine API',
+    network: 'TRON Nile Testnet',
+    docs: 'https://github.com/cosmosery/gwdc-hackathon',
+    frontend: 'https://settle-payroll-web.vercel.app'
+  });
 
-  app.get('/', serveDashboard);
-  app.get('/dashboard', serveDashboard);
+  app.get('/', serveApiRoot);
+  app.get('/dashboard', serveApiRoot);
   app.get('/health', async () => ({ status: 'ok', time: new Date().toISOString() }));
 
   let recoveryTimer;
