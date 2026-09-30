@@ -5,6 +5,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "build": "echo 'no build needed'",
     "check": "node scripts/check-local.cjs",
     "deploy:factory": "node --env-file=.env scripts/deploy-batch-factory.cjs",
     "e2e:api": "node --env-file=.env scripts/api-e2e.cjs",

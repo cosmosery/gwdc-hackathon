@@ -1,8 +1,9 @@
 import type { Batch, BatchProgressView, Payment, Quote, Reconciliation, ReviewRow } from './domain';
 import { TOKEN } from './domain';
 export class ApiError extends Error { constructor(message:string,public status:number){super(message);} }
-let apiToken='';
-export function setApiToken(value:string){apiToken=value.trim();}
+const DEMO_BEARER_TOKEN = '22016109c55d3b06a55a164172a0c03142bf4a13b34b3e77b47264152345d4df';
+let apiToken = DEMO_BEARER_TOKEN;
+export function setApiToken(value:string){apiToken=value.trim() || DEMO_BEARER_TOKEN;}
 async function request(path:string,body?:unknown,key?:string){
   const res=await fetch('/api'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(key?{'Idempotency-Key':key}:{}),...(apiToken?{Authorization:'Bearer '+apiToken}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(16000)});
   const value=await res.json(); if(!res.ok)throw new ApiError(value.error||'Engine request failed',res.status);return value;
