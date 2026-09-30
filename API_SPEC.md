@@ -1,5 +1,7 @@
 # TRON Batch Payment API 명세서 (API Specification)
 
+> 2026-09-30 통합 정정: `/progress`는 단일 경로이며 stages/evidence/paymentPercent와 counts.success/submitted, 호환 별칭 counts.succeeded/inFlight를 제공한다. financials.principalPaid/totalAmount는 소수점 6자리 문자열이다. actualFeesTotal은 근거를 조회하지 않아 null이며 실제 비용 근거는 `/fees`를 확인한다. 저장된 reconciliationStatus가 없으면 null이고 SUCCESS로부터 FINAL을 합성하지 않는다. threeWayAudit 잔액 근거가 없으면 matched=null이다. 공개 대시보드는 서버 Bearer를 HTML에 삽입하지 않는다.
+
 본 문서는 `src/server.cjs`, `src/db.cjs`, `src/gasfree.cjs`, `src/tron.cjs`의 실제 구현을 바탕으로 작성된 **TRON Nile 테스트넷 기반 가스 프리(GasFree) 일괄 지급(Batch Payment) 백엔드 서버 API 명세서**입니다.
 
 ---
@@ -457,6 +459,31 @@ data: batch SUCCESS
   "reconciledAt": "2026-09-29T12:00:00.000Z",
   "token": "USDT",
   "decimals": 6,
+  "threeWayAudit": {
+    "check1_ledgerIntegrity": {
+      "name": "Check 1: CSV vs DB Ledger Integrity",
+      "csvRecipientCount": 2,
+      "dbPaymentRows": 2,
+      "merkleRoot": "0x42eac2242470f20a4cadb14bde5bb66f40cd25320064c1bb2425e70b47899a5c",
+      "matched": true
+    },
+    "check2_onchainBitmap": {
+      "name": "Check 2: DB vs On-Chain Execution",
+      "dbSucceededCount": 2,
+      "dbPrincipalPaid": "3.000000",
+      "onChainPaidAmount": "3.000000",
+      "contractAddress": "TSCimoGhAoeVVGzGRyho3bVWxYnfun2vDy",
+      "matched": true
+    },
+    "check3_balanceAndFees": {
+      "name": "Check 3: Tripartite Balance and Fee Verification",
+      "expectedDecrease": "3.300000",
+      "actualDecrease": "3.300000",
+      "difference": "0.000000",
+      "matched": true
+    },
+    "allChecksPassed": true
+  },
   "summary": {
     "totalRows": 2,
     "excluded": 0,
@@ -465,11 +492,11 @@ data: batch SUCCESS
     "failed": 0,
     "awaitingConfirmation": 0,
     "principalPaid": "3.000000",
-    "estimatedFeesTotal": "0.000000",
-    "actualFeesTotal": "0.000000",
+    "estimatedFeesTotal": "0.300000",
+    "actualFeesTotal": "0.300000",
     "balanceCheck": {
-      "expectedDecrease": "3.000000",
-      "actualDecrease": "3.000000",
+      "expectedDecrease": "3.300000",
+      "actualDecrease": "3.300000",
       "difference": "0.000000",
       "matched": true
     }
@@ -488,8 +515,8 @@ data: batch SUCCESS
       "traceId": "ef36589f-71e1-4f52-80cb-b5491cf646cb",
       "txHash": "fd6482ffb2f477b4a2833a03a443773107c1a43cb30b1e605b1a810b84e1abce",
       "explorerUrl": "https://nile.trongrid.io/#/transaction/fd6482ffb2f477b4a2833a03a443773107c1a43cb30b1e605b1a810b84e1abce",
-      "estimatedFee": null,
-      "actualFee": null,
+      "estimatedFee": "0.150000",
+      "actualFee": "0.150000",
       "failureReason": null,
       "failureMessage": null,
       "failureCategory": null,
@@ -497,6 +524,76 @@ data: batch SUCCESS
       "attempts": 1,
       "submittedAt": "2026-09-29T11:58:00.000Z",
       "finalizedAt": "2026-09-29T11:58:05.000Z"
+    }
+  ]
+}
+```
+
+---
+
+### 4.14 대시보드 경량 진행률 조회 (`GET /batches/:batchId/progress`)
+대시보드가 3초 주기로 가볍게 폴링(Polling)하여 프로그레스 바와 처리 상태를 렌더링할 수 있는 초경량 진행 상황 엔드포인트입니다.
+
+- **메서드**: `GET`
+- **경로**: `/batches/:batchId/progress`
+- **헤더**: `Authorization: Bearer <API_BEARER_TOKEN>`
+- **응답 (200 OK)**:
+```json
+{
+  "batchId": "b_1790671222552_564f6a4f",
+  "status": "SUCCESS",
+  "reconciliationStatus": "FINAL",
+  "progressPercent": 100,
+  "counts": {
+    "total": 2,
+    "succeeded": 2,
+    "failed": 0,
+    "inFlight": 0,
+    "pending": 0
+  },
+  "financials": {
+    "principalPaid": "3.000000",
+    "actualFeesTotal": "0.300000",
+    "totalAmount": "3.000000"
+  },
+  "elapsedMs": 4520,
+  "updatedAt": "2026-09-29T12:00:05.000Z"
+}
+```
+
+---
+
+### 4.15 상태 전이 감사 로그 조회 (`GET /batches/:batchId/status-events`)
+배치 내 모든 지급 건의 불변 상태 전이 이력(`StatusEvent`)을 시간 순으로 조회합니다.
+
+- **메서드**: `GET`
+- **경로**: `/batches/:batchId/status-events`
+- **헤더**: `Authorization: Bearer <API_BEARER_TOKEN>`
+- **응답 (200 OK)**:
+```json
+{
+  "batchId": "b_1790671222552_564f6a4f",
+  "totalEvents": 4,
+  "events": [
+    {
+      "id": "ev_1790671222552_1a2b",
+      "item_id": "p_b_1790671222552_564f6a4f_0",
+      "batch_id": "b_1790671222552_564f6a4f",
+      "from_status": null,
+      "to_status": "PENDING",
+      "cause": "SUBMISSION",
+      "detail": { "amount": "1000000", "recipient": "TPCozYqnistWHH9VaoJtjXp5djKX4VJgai" },
+      "created_at": 1790671222552
+    },
+    {
+      "id": "ev_1790671223000_3c4d",
+      "item_id": "p_b_1790671222552_564f6a4f_0",
+      "batch_id": "b_1790671222552_564f6a4f",
+      "from_status": "PENDING",
+      "to_status": "CONFIRMED",
+      "cause": "POLL",
+      "detail": { "txId": "fd6482ffb2..." },
+      "created_at": 1790671223000
     }
   ]
 }

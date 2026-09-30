@@ -115,12 +115,51 @@ async function buildReconciliationReport({ db, batchId, relayerWeb }) {
     };
   });
 
+  // Tripartite Checks
+  // Check 1: CSV vs DB Ledger Integrity
+  const check1_ledgerIntegrity = {
+    name: 'Check 1: CSV vs DB Ledger Integrity',
+    csvRecipientCount: batch.recipient_count,
+    dbPaymentRows: totalRows,
+    merkleRoot: batch.merkle_root,
+    matched: totalRows === batch.recipient_count
+  };
+
+  // Check 2: DB vs On-Chain Bitmap & Paid Amount
+  const check2_onchainBitmap = {
+    name: 'Check 2: DB vs On-Chain Execution',
+    dbSucceededCount: succeeded,
+    dbPrincipalPaid: toFixed6Decimals(principalPaidBig),
+    onChainPaidAmount: toFixed6Decimals(onChainPaidAmount),
+    contractAddress: batch.executor_address,
+    matched: onChainPaidAmount === null ? null : principalPaidBig === onChainPaidAmount
+  };
+
+  // Check 3: Tripartite Balance and Fee Verification
+  const check3_balanceAndFees = {
+    name: 'Check 3: Tripartite Balance and Fee Verification',
+    expectedDecrease: null,
+    actualDecrease: null,
+    difference: null,
+    matched: null,
+    evidenceStatus: 'UNAVAILABLE',
+    reason: 'Independent balance snapshots and verified fees are not recorded'
+  };
+
+  const allChecksPassed = check1_ledgerIntegrity.matched && check2_onchainBitmap.matched && check3_balanceAndFees.matched === true;
+
   return {
     batchId,
     reconciliationStatus,
     reconciledAt: nowIso,
     token: 'USDT',
     decimals: 6,
+    threeWayAudit: {
+      check1_ledgerIntegrity,
+      check2_onchainBitmap,
+      check3_balanceAndFees,
+      allChecksPassed
+    },
     summary: {
       totalRows,
       excluded,

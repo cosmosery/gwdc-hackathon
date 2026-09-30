@@ -1,3 +1,5 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const crypto = require('node:crypto');
 const fastify = require('fastify');
 const { TronWeb } = require('tronweb');
@@ -28,7 +30,8 @@ const {
 } = require('./gasfree.cjs');
 const { buildFeeReport } = require('./feeReport.cjs');
 const { classifyFailure } = require('./failureCatalog.cjs');
-const { buildReconciliationReport } = require('./reconciler.cjs');
+const { buildReconciliationReport, toFixed6Decimals } = require('./reconciler.cjs');
+const { transitionPayment } = require('./stateMachine.cjs');
 const { leaf, merkle } = require('../scripts/common.cjs');
 
 const MAX_RECIPIENTS = 1000;
@@ -121,17 +124,24 @@ function buildServer(options = {}) {
     throw new Error('API_BEARER_TOKEN must contain at least 32 characters');
   }
 
+  const uiHtmlPath = path.join(__dirname, 'ui.html');
+  let uiHtmlTemplate = '';
+  try {
+    uiHtmlTemplate = fs.readFileSync(uiHtmlPath, 'utf8');
+  } catch (_) {}
+
   // Auth Hook
   app.addHook('onRequest', async (req, reply) => {
-    // Exclude healthcheck if needed
-    if (req.url === '/health') return;
+    // Exclude healthcheck, root UI, and dashboard from Bearer requirement
+    if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dashboard') || req.url.startsWith('/ui')) {
+      return;
+    }
 
     // For SSE in browser, EventSource does not support custom headers natively without query param
     if (req.url.split('?')[0].endsWith('/events')) {
       const authHeader = req.headers.authorization;
       const queryToken = req.query?.token;
-      if (authHeader === `Bearer ${bearerToken}` ||
-          (process.env.ENABLE_SSE_QUERY_TOKEN === '1' && queryToken === bearerToken)) {
+      if (authHeader === `Bearer ${bearerToken}` || (process.env.ENABLE_SSE_QUERY_TOKEN === '1' && queryToken === bearerToken)) {
         return;
       }
       return reply.code(401).send({ error: 'Unauthorized' });
@@ -143,6 +153,19 @@ function buildServer(options = {}) {
     }
   });
 
+  const serveDashboard = async (req, reply) => {
+    if (!uiHtmlTemplate) {
+      try {
+        uiHtmlTemplate = fs.readFileSync(uiHtmlPath, 'utf8');
+      } catch (err) {
+        return reply.code(500).send({ error: 'Dashboard UI template not found' });
+      }
+    }
+    return reply.type('text/html').send(uiHtmlTemplate);
+  };
+
+  app.get('/', serveDashboard);
+  app.get('/dashboard', serveDashboard);
   app.get('/health', async () => ({ status: 'ok', time: new Date().toISOString() }));
 
   let recoveryTimer;
@@ -714,7 +737,17 @@ function buildServer(options = {}) {
     const { batchId } = req.params;
     const batch = db.getBatch(batchId);
     if (!batch) return reply.code(404).send({ error: `Batch not found: ${batchId}` });
-    return buildBatchProgress(db, batch);
+    const projection = buildBatchProgress(db, batch);
+    const principalPaid = db.getPayments(batchId)
+      .filter(p => ['CONFIRMED', 'SUCCEEDED'].includes(p.status))
+      .reduce((sum, p) => sum + BigInt(p.amount), 0n);
+    return {
+      ...projection,
+      counts: {...projection.counts, succeeded: projection.counts.success, inFlight: projection.counts.submitted},
+      reconciliationStatus: batch.reconciliation_status || null,
+      financials: {principalPaid: toFixed6Decimals(principalPaid), totalAmount: toFixed6Decimals(batch.total_amount), actualFeesTotal: null},
+      elapsedMs: Math.max(0, Date.now() - batch.created_at)
+    };
   });
 
   // 5. GET /batches/:batchId/payments
@@ -755,6 +788,21 @@ function buildServer(options = {}) {
       return reply.code(404).send({ error: `Batch not found: ${batchId}` });
     }
     return report;
+  });
+
+  // 5-1-2. GET /batches/:batchId/status-events
+  app.get('/batches/:batchId/status-events', async (req, reply) => {
+    const { batchId } = req.params;
+    const batch = db.getBatch(batchId);
+    if (!batch) {
+      return reply.code(404).send({ error: `Batch not found: ${batchId}` });
+    }
+    const events = db.getStatusEvents(batchId);
+    return {
+      batchId,
+      totalEvents: events.length,
+      events
+    };
   });
 
   // 5-2. POST /batches/:batchId/payments/:index/retry
