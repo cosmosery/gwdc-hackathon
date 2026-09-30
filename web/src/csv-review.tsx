@@ -17,6 +17,7 @@ export function reviewEvidence(row:ReviewRow, rows:ReviewRow[]) {
 
 export function CsvReview({rows,onReview}:{rows:ReviewRow[];onReview:(row:ReviewRow)=>void}) {
   const [view,setView]=useState<'attention'|'all'>('attention');
+  const [expanded,setExpanded]=useState(false);
   const active=rows.filter(r=>!r.excluded);
   const blocked=active.filter(r=>rowState(r)==='error').length;
   const pending=active.filter(r=>rowState(r)==='warning').length;
@@ -25,6 +26,10 @@ export function CsvReview({rows,onReview}:{rows:ReviewRow[];onReview:(row:Review
   const visible=view==='attention'&&flagged?active.filter(r=>['error','warning'].includes(rowState(r))):rows;
   if(!rows.length)return null;
   return <section className="csv-review" aria-label="CSV review">
+    <button type="button" className="csv-review-toggle" aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}>
+      <strong>CSV review</strong><span className={flagged?'csv-review-attention':''}>{flagged?`${blocked} to correct · ${pending} to confirm`:'No unresolved issues'}</span><span>{ready} ready · {rows.length-active.length} excluded</span><span className="csv-review-toggle-action">{expanded?'Hide details ↑':'View checks ↓'}</span>
+    </button>
+    {expanded&&<>
     <header className="csv-review-heading"><div><span className="editorial-label">CSV REVIEW</span><h2>{flagged?`${flagged} ${flagged===1?'record needs':'records need'} your attention.`:active.length?'Your list has been checked.':'All records are excluded.'}</h2><p>{flagged?'Review the evidence below before calculating fees.':active.length?'No unresolved validation issues. Review the details, then calculate fees.':'Restore a record to prepare a payment.'}</p></div><span className="csv-review-source">Based on this file</span></header>
     <div className="csv-review-summary" aria-live="polite"><span><b>{blocked}</b> to correct</span><span><b>{pending}</b> to confirm</span><span><b>{ready}</b> ready</span><span><b>{rows.length-active.length}</b> excluded</span></div>
     <div className="csv-review-controls"><p>Addresses, payment references, amounts and required fields checked.</p><button type="button" className="text-button" onClick={()=>setView(view==='all'?'attention':'all')}>{view==='all'?'Focus on unresolved records':'Show all records'}</button></div>
@@ -39,5 +44,6 @@ export function CsvReview({rows,onReview}:{rows:ReviewRow[];onReview:(row:Review
       </article>;
     })}</div>
     <p className="csv-review-boundary">You decide what to include. Reviewing this file does not sign or send a payment.</p>
+    </>}
   </section>;
 }

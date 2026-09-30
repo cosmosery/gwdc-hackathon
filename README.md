@@ -1,4 +1,14 @@
-# GasFree → BatchExecutor Nile 검증
+# Settle · GasFree Batch Payments
+
+**[프론트 실행하기 →](https://settle-payroll-web.vercel.app)** · [Engine API](https://tron-gasfree-batch-nile-probe.vercel.app) · [현재 연동 상태](docs/CURRENT_INTEGRATION_KO.md)
+
+TRON Nile에서 CSV 지급 목록을 검토하고, 사용자 GasFree 계정에서 배치별 vault로 입금한 뒤 엔진을 통해 수취인별 지급 결과를 확인합니다.
+
+현재 웹 흐름은 **CSV 검토 → 수수료 조회 → vault 준비 → TronLink GasFree에서 수동 송금 → Start payouts → 결과·대사**입니다. 웹은 PermitTransfer 서명 팝업을 요청하지 않습니다. 입금 후 실행 요청은 `POST /batches/:batchId/execute`, `{ "mode": "direct" }`이며 signature를 보내지 않습니다. 서버의 해당 실행 모드 지원과 릴레이어 자원이 필요합니다.
+
+공개 페이지에서 엔진 기능을 사용하려면 **Open another batch · connection settings → Engine access token**에 발급받은 토큰을 입력합니다. 토큰은 해당 탭 메모리에만 유지되며 새로고침 후 다시 입력해야 합니다. 저장소·배포 번들에는 토큰을 포함하지 않습니다. Chrome의 TronLink를 Nile로 설정하고 GasFree 계정 잔액을 준비하세요.
+
+프론트 배포 프로젝트는 `settle-payroll-web`, 소스 디렉터리는 `web/`입니다. `cd web` 후 `npx vercel --prod`로 배포합니다. GitHub 자동 배포 연결은 아직 완료되지 않았으므로 push만으로 배포되지는 않습니다. 아래는 엔진의 기존 실증 설계와 개발 문서입니다.
 
 ## Q1. Nile에서 확인할 것
 

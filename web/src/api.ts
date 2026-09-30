@@ -1,8 +1,10 @@
 import type { Batch, BatchProgressView, Payment, Quote, Reconciliation, ReviewRow } from './domain';
 import { TOKEN } from './domain';
 export class ApiError extends Error { constructor(message:string,public status:number){super(message);} }
+let apiToken='';
+export function setApiToken(value:string){apiToken=value.trim();}
 async function request(path:string,body?:unknown,key?:string){
-  const res=await fetch('/api'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json',...(key?{'Idempotency-Key':key}:{})}:undefined,body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(16000)});
+  const res=await fetch('/api'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(key?{'Idempotency-Key':key}:{}),...(apiToken?{Authorization:'Bearer '+apiToken}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(16000)});
   const value=await res.json(); if(!res.ok)throw new ApiError(value.error||'Engine request failed',res.status);return value;
 }
 export function assertQuote(v:any):Quote {
@@ -38,7 +40,12 @@ export const engine={
     if(value.batchId!==batchId||!/^\d+$/.test(value.balance)||!/^\d+$/.test(value.required)||value.funded!==(BigInt(value.balance)>=BigInt(value.required)))throw Error('Unexpected on-chain funding response');
     return value;
   },
-  resumeFunded:(batchId:string)=>request('/batches/'+id(batchId)+'/resume',{}),
+  executeFunded:async(batchId:string,key:string)=>{
+    if(!key)throw Error('An execution idempotency key is required');
+    const value=await request('/batches/'+id(batchId)+'/execute',{mode:'direct'},key);
+    if(value.batchId!==batchId||!['PROCESSING','PAYOUT_PENDING','SUCCESS','PARTIAL_SUCCESS','FAILED','REFUNDED'].includes(value.status))throw Error('Unexpected execution response; check batch status before retrying');
+    return value;
+  },
   fees:(batchId:string)=>request('/batches/'+id(batchId)+'/fees'),
   signingContext:(batchId:string)=>request('/batches/'+id(batchId)+'/signing-context'),
   execute:(batchId:string,authorization:unknown,signature:string,key:string)=>request('/batches/'+id(batchId)+'/execute',{authorization,signature},key),

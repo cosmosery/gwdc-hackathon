@@ -33,6 +33,17 @@ test('wrong wallet network is rejected',async()=>{const p=provider();p.request=a
 test('wallet cancellation is propagated without submission',async()=>{const p=provider();p.tronWeb.trx._signTypedData=async()=>{throw Error('User rejected');};await assert.rejects(signPermit(fixture().context,SENDER,p),/rejected/);});
 test('account change during signing invalidates signature',async()=>{const p=provider();p.tronWeb.trx._signTypedData=async()=>{p.tronWeb.defaultAddress.base58=FACTORY;return 'ab'.repeat(65);};await assert.rejects(signPermit(fixture().context,SENDER,p),/changed/);});
 test('valid signature is returned only after post-sign wallet check',async()=>{assert.equal(await signPermit(fixture().context,SENDER,provider()),'ab'.repeat(65));});
+test('authorized TronLink connection is reused without a connect popup',async()=>{
+ const calls:string[]=[];const p={...provider(),ready:true};Object.assign(p.tronWeb,{ready:true});
+ p.request=async(args?:any)=>{calls.push(args.method);return '0x'+NILE_CHAIN.toString(16);};
+ assert.equal(await connectWallet(p),SENDER);assert.deepEqual(calls,['eth_chainId']);
+});
+test('explicit third-party permit rejection is not repeatedly prompted',async()=>{
+ const p=provider();let calls=0;p.tronWeb.trx._signTypedData=async()=>{calls++;throw Error('TronLink does not support permit transfer requests from a third party');};
+ await assert.rejects(signPermit(fixture().context,SENDER,p),/No signed permit was submitted/);
+ await assert.rejects(signPermit(fixture().context,SENDER,p),/No signed permit was submitted/);
+ assert.equal(calls,1);
+});
 
 test('older TronLink Unknown method falls back to native connection and verifies Nile node',async()=>{
  const calls:string[]=[];const p={request:async({method}:{method:string})=>{calls.push(method);if(method==='tron_requestAccounts')return {code:200};throw Error('Unknown method called');},tronWeb:{defaultAddress:{base58:SENDER},fullNode:{host:'https://nile.trongrid.io'}}};

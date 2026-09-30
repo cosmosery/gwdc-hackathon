@@ -12,7 +12,8 @@
     "ethers": "^6.15.0",
     "papaparse": "^5.5.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "tronweb": "^6.0.4"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

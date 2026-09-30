@@ -34,6 +34,8 @@ export function walletProvider(){const w=window as any;const p=w.tron||w.tronLin
 function unsupported(error:any){return [4200,-32601].includes(error?.code)||/^Unknown method called\.?$/i.test(error?.message||'');}
 function walletWeb(p:any){return p.tronWeb||(typeof window!=='undefined'?(window as any).tronWeb:undefined);}
 export async function connectWallet(p=walletProvider()){
+ // Reuse an explicitly authorized provider; an exposed address alone is not consent.
+ if(p.ready===true&&walletWeb(p)?.ready===true&&walletWeb(p)?.defaultAddress?.base58)return assertWallet(p);
  try{await p.request({method:'eth_requestAccounts'});}
  catch(error){
    if(!unsupported(error))throw error;
@@ -59,11 +61,24 @@ export async function assertWallet(p:any,expected?:string){
  if(!address||!await validAddress(address))throw Error('Unlock TronLink and authorize this site');
  if(expected&&address!==expected)throw Error('Wallet account changed; request a fresh quote');return address;
 }
+const blockedPermitProviders=new WeakSet<object>();
+export class PermitTransferUnsupportedError extends Error {
+ constructor(){super('TronLink blocked this website’s GasFree PermitTransfer request. No signed permit was submitted to /execute. This wallet needs a supported GasFree signing integration; reconnecting does not remove the restriction.');this.name='PermitTransferUnsupportedError';}
+}
 export async function signPermit(context:any,sender:string,p=walletProvider()){
+ if(blockedPermitProviders.has(p))throw new PermitTransferUnsupportedError();
  await assertWallet(p,sender);
  const web=walletWeb(p);
  if(typeof web?.trx?._signTypedData!=='function')throw Error('This wallet does not support TIP-712 signing');
- const signature=await web.trx._signTypedData(context.domain,context.types,context.authorization);
+ let signature;
+ try {signature=await web.trx._signTypedData(context.domain,context.types,context.authorization);}
+ catch(error){
+   const message=typeof error==='string'?error:(error as any)?.message||'';
+   if(/permit\s*transfer/i.test(message)&&/third\s*party|not support/i.test(message)){
+     blockedPermitProviders.add(p);throw new PermitTransferUnsupportedError();
+   }
+   throw error;
+ }
  await assertWallet(p,sender);
  if(typeof signature!=='string'||!/^(0x)?[a-fA-F0-9]{130}$/.test(signature))throw Error('Wallet returned an invalid signature');return signature;
 }
